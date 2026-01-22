@@ -230,8 +230,8 @@ def validate_lakefs(
         # Test 3: API version check
         context.log.info("Test 3: API version check...")
         try:
-            client = lakefs.get_client()
-            # Try to get config/version info
+            # Verify client can be created (validates endpoint/credentials)
+            _ = lakefs.get_client()
             result.tests.append({
                 "name": "api_version",
                 "passed": True,
@@ -240,7 +240,6 @@ def validate_lakefs(
         except Exception as e:
             result.tests.append({"name": "api_version", "passed": False, "error": str(e)})
             # Not a critical failure
-            pass
 
     except Exception as e:
         result.error = str(e)

@@ -2,8 +2,8 @@
 
 import dagster as dg
 
-from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.lakefs import LakeFSResource
+from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.nim import NIMResource
 
 

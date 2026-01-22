@@ -1,7 +1,5 @@
 """Tests for resources."""
 
-import pytest
-
 
 def test_minio_resource_init():
     """Test MinIO resource initialization."""

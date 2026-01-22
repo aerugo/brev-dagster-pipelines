@@ -1,7 +1,6 @@
 """Tests for demo assets."""
 
 import pandas as pd
-import pytest
 
 
 class MockContext:

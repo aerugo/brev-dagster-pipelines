@@ -6,8 +6,8 @@ from dagster import Definitions, EnvVar
 
 from brev_pipelines.assets.demo import demo_assets
 from brev_pipelines.assets.health import health_assets
-from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.lakefs import LakeFSResource
+from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.nim import NIMResource
 
 defs = Definitions(

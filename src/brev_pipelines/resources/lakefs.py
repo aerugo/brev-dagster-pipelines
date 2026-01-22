@@ -28,3 +28,12 @@ class LakeFSResource(ConfigurableResource):
         client = self.get_client()
         repos = client.repositories_api.list_repositories()
         return [repo.id for repo in repos.results]
+
+    def health_check(self) -> bool:
+        """Check if LakeFS is accessible."""
+        try:
+            client = self.get_client()
+            client.repositories_api.list_repositories()
+            return True
+        except Exception:
+            return False

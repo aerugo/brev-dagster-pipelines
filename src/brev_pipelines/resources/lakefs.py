@@ -16,8 +16,15 @@ class LakeFSResource(ConfigurableResource):
         import lakefs_sdk
         from lakefs_sdk.client import LakeFSClient
 
+        # Handle endpoint with or without protocol
+        endpoint = self.endpoint
+        if endpoint.startswith("http://") or endpoint.startswith("https://"):
+            host = endpoint
+        else:
+            host = f"http://{endpoint}"
+
         config = lakefs_sdk.Configuration(
-            host=f"http://{self.endpoint}",
+            host=host,
             username=self.access_key,
             password=self.secret_key,
         )

@@ -435,22 +435,63 @@ class SafeSynthesizerResource(ConfigurableResource):
                 # Scale down - nim-llm will auto-restart
                 self._scale_deployment(replicas=0)
 
+    def _ensure_hf_dataset_exists(self) -> str:
+        """Ensure HuggingFace-compatible dataset exists in NDS.
+
+        Creates the dataset via HF API if it doesn't exist.
+
+        Returns:
+            The dataset repo ID (e.g., 'default/speeches-data').
+        """
+        # Extract repo name from nds_repo (e.g., 'admin/central-bank-speeches' -> 'speeches-data')
+        repo_name = self.nds_repo.split("/")[-1]
+
+        # Try to create dataset via HF API
+        create_url = f"{self.nds_endpoint}/v1/hf/api/repos/create"
+        create_payload = {"type": "dataset", "name": repo_name, "private": False}
+
+        try:
+            response = requests.post(
+                create_url,
+                json=create_payload,
+                headers={"Authorization": f"Bearer {self.nds_token}"},
+                timeout=30,
+            )
+            if response.status_code == 200:
+                result = response.json()
+                # Returns {'url': 'datasets/default/repo-name'}
+                return result.get("url", f"default/{repo_name}").replace("datasets/", "")
+            elif response.status_code == 409:
+                # Already exists
+                return f"default/{repo_name}"
+            else:
+                response.raise_for_status()
+        except requests.exceptions.HTTPError:
+            # Assume it exists if we get an error
+            pass
+
+        return f"default/{repo_name}"
+
     def _upload_to_nds(self, data: list[dict[str, Any]], run_id: str) -> str:
         """Upload data to NDS (NeMo Data Store) for Safe Synthesizer.
 
-        Uploads data as a parquet file using Gitea's REST API.
+        Uses Git LFS protocol for uploading parquet files, as required by NDS.
 
         Args:
             data: Input data records to upload.
             run_id: Unique run identifier for the file name.
 
         Returns:
-            The repo path for the uploaded data (e.g., admin/central-bank-speeches/input_xxx.parquet).
+            HuggingFace-style URL for Safe Synthesizer (hf://datasets/repo/file.parquet).
         """
         import base64
+        import hashlib
         import io
 
         import pandas as pd
+
+        # Ensure HF dataset exists
+        repo_id = self._ensure_hf_dataset_exists()
 
         # Convert data to parquet bytes
         df = pd.DataFrame(data)
@@ -458,44 +499,96 @@ class SafeSynthesizerResource(ConfigurableResource):
         df.to_parquet(buffer, index=False)
         parquet_bytes = buffer.getvalue()
 
-        # Upload file via Gitea API
+        # Calculate SHA256 hash and size for LFS
+        file_hash = hashlib.sha256(parquet_bytes).hexdigest()
+        file_size = len(parquet_bytes)
         filename = f"input_{run_id}.parquet"
-        owner, repo = self.nds_repo.split("/")
 
-        # First, try to get existing file (for update)
-        get_url = f"{self.nds_endpoint}/api/v1/repos/{owner}/{repo}/contents/{filename}"
-        sha = None
-        try:
-            get_response = requests.get(
-                get_url,
-                headers={"Authorization": f"token {self.nds_token}"},
+        # Step 1: LFS batch request to get upload URL
+        lfs_batch_url = f"{self.nds_endpoint}/{repo_id}.git/info/lfs/objects/batch"
+        lfs_payload = {
+            "operation": "upload",
+            "transfers": ["basic"],
+            "objects": [{"oid": file_hash, "size": file_size}],
+        }
+
+        batch_response = requests.post(
+            lfs_batch_url,
+            json=lfs_payload,
+            headers={
+                "Accept": "application/vnd.git-lfs+json",
+                "Content-Type": "application/vnd.git-lfs+json",
+                "Authorization": f"token {self.nds_token}",
+            },
+            timeout=30,
+        )
+        batch_response.raise_for_status()
+        batch_result = batch_response.json()
+
+        # Step 2: Upload file via LFS
+        upload_info = batch_result["objects"][0]["actions"]["upload"]
+        upload_headers = {"Content-Type": "application/octet-stream"}
+        upload_headers.update(upload_info.get("header", {}))
+
+        upload_response = requests.put(
+            upload_info["href"],
+            data=parquet_bytes,
+            headers=upload_headers,
+            timeout=120,
+        )
+        upload_response.raise_for_status()
+
+        # Step 3: Verify upload if endpoint provided
+        verify_info = batch_result["objects"][0]["actions"].get("verify")
+        if verify_info:
+            verify_payload = {"oid": file_hash, "size": file_size}
+            verify_headers = {"Content-Type": "application/vnd.git-lfs+json"}
+            verify_headers.update(verify_info.get("header", {}))
+            requests.post(
+                verify_info["href"],
+                json=verify_payload,
+                headers=verify_headers,
                 timeout=30,
             )
+
+        # Step 4: Create Git commit with LFS pointer
+        lfs_pointer = f"""version https://git-lfs.github.com/spec/v1
+oid sha256:{file_hash}
+size {file_size}
+"""
+        # Check if file exists (for update)
+        contents_url = f"{self.nds_endpoint}/api/v1/repos/{repo_id}/contents/{filename}"
+        existing_sha = None
+        try:
+            get_response = requests.get(
+                contents_url,
+                headers={"Authorization": f"token {self.nds_token}"},
+                timeout=10,
+            )
             if get_response.status_code == 200:
-                sha = get_response.json().get("sha")
+                existing_sha = get_response.json().get("sha")
         except Exception:
             pass
 
-        # Upload/update file via Gitea contents API
-        upload_url = f"{self.nds_endpoint}/api/v1/repos/{owner}/{repo}/contents/{filename}"
-        payload: dict[str, Any] = {
+        # Commit the LFS pointer file
+        commit_payload: dict[str, Any] = {
             "message": f"Add input data for run {run_id}",
-            "content": base64.b64encode(parquet_bytes).decode("utf-8"),
+            "content": base64.b64encode(lfs_pointer.encode()).decode("utf-8"),
         }
-        if sha:
-            payload["sha"] = sha
+        if existing_sha:
+            commit_payload["sha"] = existing_sha
 
-        response = requests.post(
-            upload_url,
-            json=payload,
+        commit_response = requests.request(
+            "PUT" if existing_sha else "POST",
+            contents_url,
+            json=commit_payload,
             headers={"Authorization": f"token {self.nds_token}"},
-            timeout=120,
+            timeout=30,
         )
-        response.raise_for_status()
+        commit_response.raise_for_status()
 
         # Return HuggingFace-style URL as expected by Safe Synthesizer
-        # Format: hf://datasets/{repo-namespace}/{repo-name}/{filename}
-        return f"hf://datasets/{self.nds_repo}/{filename}"
+        return f"hf://datasets/{repo_id}/{filename}"
 
     def _synthesize_via_api(
         self,

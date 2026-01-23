@@ -1,14 +1,15 @@
 """NVIDIA Safe Synthesizer resource for Dagster.
 
-Launches Safe Synthesizer as a Kubernetes Job with KAI Scheduler integration.
-The Job uses priority-based preemption to temporarily acquire GPU from NIM.
+Manages Safe Synthesizer deployment with automatic GPU time-sharing.
+Uses KAI Scheduler priority-based preemption for GPU orchestration.
 
 How it works:
-1. Dagster creates a Kubernetes Job with batch-high priority (130)
-2. KAI Scheduler preempts the NIM pod (priority 125) to free the GPU
-3. Safe Synthesizer Job runs to completion
-4. NIM Deployment automatically restarts its pod
-5. No manual intervention required
+1. Dagster scales safe-synth deployment from 0 to 1 replica
+2. KAI Scheduler preempts nim-llm (priority 125) for safe-synth (priority 130)
+3. Safe Synthesizer runs the synthesis job
+4. Dagster scales safe-synth back to 0 replicas
+5. nim-llm automatically restarts
+6. No manual intervention required!
 """
 
 import json
@@ -85,6 +86,65 @@ class SafeSynthesizerResource(ConfigurableResource):
         except config.ConfigException:
             config.load_kube_config()
         return client.CoreV1Api()
+
+    def _get_k8s_apps_client(self) -> Any:
+        """Get Kubernetes apps API client."""
+        from kubernetes import client, config
+
+        try:
+            config.load_incluster_config()
+        except config.ConfigException:
+            config.load_kube_config()
+        return client.AppsV1Api()
+
+    def _scale_deployment(self, replicas: int) -> None:
+        """Scale the safe-synth deployment.
+
+        Args:
+            replicas: Target replica count (0 or 1).
+        """
+        apps_api = self._get_k8s_apps_client()
+        apps_api.patch_namespaced_deployment_scale(
+            name="safe-synth",
+            namespace=self.namespace,
+            body={"spec": {"replicas": replicas}},
+        )
+
+    def _wait_for_ready(self, timeout: int = 600) -> bool:
+        """Wait for safe-synth deployment to be ready.
+
+        Args:
+            timeout: Maximum wait time in seconds.
+
+        Returns:
+            True if ready, raises TimeoutError otherwise.
+        """
+        apps_api = self._get_k8s_apps_client()
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            deployment = apps_api.read_namespaced_deployment(
+                name="safe-synth",
+                namespace=self.namespace,
+            )
+            if (
+                deployment.status.ready_replicas
+                and deployment.status.ready_replicas >= 1
+            ):
+                # Also verify the service is responding
+                try:
+                    response = requests.get(
+                        f"{self.service_endpoint}/health", timeout=10
+                    )
+                    if response.status_code == 200:
+                        return True
+                except Exception:
+                    pass
+            time.sleep(10)
+
+        raise TimeoutError(
+            f"safe-synth deployment not ready after {timeout} seconds"
+        )
 
     def create_synthesis_job(
         self,
@@ -308,15 +368,16 @@ class SafeSynthesizerResource(ConfigurableResource):
         run_id: str,
         config: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Run full synthesis pipeline.
+        """Run full synthesis pipeline with automatic GPU orchestration.
 
-        This method attempts to use the service API endpoint first.
-        If not available, falls back to job-based approach (requires MinIO setup).
+        This method automatically:
+        1. Scales up the safe-synth deployment (0 -> 1 replica)
+        2. Waits for the service to be ready (KAI preempts nim-llm)
+        3. Runs the synthesis via API
+        4. Scales down the deployment (1 -> 0 replica)
+        5. nim-llm automatically restarts
 
-        GPU orchestration is handled automatically by KAI Scheduler:
-        - Safe Synthesizer job runs with batch-high priority (130)
-        - KAI preempts NIM (priority 125) to free the GPU
-        - After job completion, NIM Deployment restarts automatically
+        No manual intervention required!
 
         Args:
             input_data: Input data records.
@@ -326,20 +387,20 @@ class SafeSynthesizerResource(ConfigurableResource):
         Returns:
             Tuple of (synthetic_data, evaluation_report).
         """
-        # Try service endpoint first
-        try:
-            response = requests.get(f"{self.service_endpoint}/health", timeout=5)
-            if response.status_code == 200:
-                return self._synthesize_via_api(input_data, config)
-        except Exception:
-            pass
+        # Check if already running
+        already_running = self.health_check()
 
-        # Fall back to job-based approach
-        raise NotImplementedError(
-            "Job-based synthesis requires data transfer via MinIO. "
-            "Ensure the Safe Synthesizer service is running or implement "
-            "data transfer via ConfigMaps/PVCs."
-        )
+        if not already_running:
+            # Scale up deployment - KAI will preempt nim-llm
+            self._scale_deployment(replicas=1)
+            self._wait_for_ready(timeout=600)  # 10 min for model loading
+
+        try:
+            return self._synthesize_via_api(input_data, config)
+        finally:
+            if not already_running:
+                # Scale down - nim-llm will auto-restart
+                self._scale_deployment(replicas=0)
 
     def _synthesize_via_api(
         self,

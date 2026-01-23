@@ -35,6 +35,9 @@ class SafeSynthesizerResource(ConfigurableResource):
         namespace: Kubernetes namespace for Safe Synthesizer jobs.
         image: Safe Synthesizer container image.
         service_endpoint: Safe Synthesizer service endpoint for API calls.
+        nds_endpoint: NeMo Data Store endpoint for HuggingFace-compatible uploads.
+        nds_token: Access token for NDS authentication.
+        nds_repo: Repository name in NDS for data uploads.
         poll_interval: Job status polling interval in seconds.
         max_wait_time: Maximum wait time for job completion in seconds.
         gpu_memory: GPU memory allocation for KAI Scheduler.
@@ -57,6 +60,18 @@ class SafeSynthesizerResource(ConfigurableResource):
     service_endpoint: str = Field(
         default="http://nemo-safe-synthesizer.nvidia-ai.svc.cluster.local:8000",
         description="Safe Synthesizer API endpoint",
+    )
+    nds_endpoint: str = Field(
+        default="http://nemo-data-store.nvidia-ai.svc.cluster.local:3000/v1/hf",
+        description="NeMo Data Store HuggingFace-compatible endpoint",
+    )
+    nds_token: str = Field(
+        default="",
+        description="NDS access token (from nds-credentials secret)",
+    )
+    nds_repo: str = Field(
+        default="admin/central-bank-speeches",
+        description="NDS repository for data uploads",
     )
     poll_interval: int = Field(
         default=30,
@@ -414,75 +429,191 @@ class SafeSynthesizerResource(ConfigurableResource):
             self._wait_for_ready(timeout=600)  # 10 min for model loading
 
         try:
-            return self._synthesize_via_api(input_data, config)
+            return self._synthesize_via_api(input_data, config, run_id)
         finally:
             if not already_running:
                 # Scale down - nim-llm will auto-restart
                 self._scale_deployment(replicas=0)
 
+    def _upload_to_nds(self, data: list[dict[str, Any]], run_id: str) -> str:
+        """Upload data to NDS (NeMo Data Store) for Safe Synthesizer.
+
+        Uploads data as a parquet file to the HuggingFace-compatible data store.
+
+        Args:
+            data: Input data records to upload.
+            run_id: Unique run identifier for the file name.
+
+        Returns:
+            The HuggingFace-style repo path for the uploaded data.
+        """
+        import io
+        import os
+
+        import pandas as pd
+        from huggingface_hub import HfApi
+
+        # Convert data to parquet bytes
+        df = pd.DataFrame(data)
+        buffer = io.BytesIO()
+        df.to_parquet(buffer, index=False)
+        parquet_bytes = buffer.getvalue()
+
+        # Write to temp file for upload
+        temp_path = f"/tmp/synth_input_{run_id}.parquet"
+        with open(temp_path, "wb") as f:
+            f.write(parquet_bytes)
+
+        try:
+            # Initialize HuggingFace API with NDS endpoint
+            hf_api = HfApi(endpoint=self.nds_endpoint, token=self.nds_token)
+
+            # Upload file to repository
+            hf_api.upload_file(
+                path_or_fileobj=temp_path,
+                path_in_repo=f"input_{run_id}.parquet",
+                repo_id=self.nds_repo,
+                repo_type="dataset",
+            )
+
+            return f"{self.nds_repo}/input_{run_id}.parquet"
+        finally:
+            # Clean up temp file
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
     def _synthesize_via_api(
         self,
         data: list[dict[str, Any]],
         config: dict[str, Any] | None = None,
+        run_id: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Synthesize data via the API endpoint."""
-        default_config = {
-            "epsilon": 1.0,
-            "delta": 1e-5,
-            "piiReplacement": True,
-            "temperature": 0.7,
-            "runMiaEvaluation": True,
-            "runAiaEvaluation": True,
+        """Synthesize data via the Safe Synthesizer API.
+
+        This method:
+        1. Uploads data to NDS (HuggingFace-compatible data store)
+        2. Creates a Safe Synthesizer job via /v1beta1/safe-synthesizer/jobs
+        3. Polls for completion
+        4. Downloads and returns synthetic data
+
+        Args:
+            data: Input data records.
+            config: Optional synthesis configuration.
+            run_id: Optional run identifier for tracking.
+
+        Returns:
+            Tuple of (synthetic_data, evaluation_report).
+        """
+        import uuid
+
+        # Generate run ID if not provided
+        if run_id is None:
+            run_id = str(uuid.uuid4())[:8]
+
+        # Upload data to NDS
+        data_source = self._upload_to_nds(data, run_id)
+
+        # Build Safe Synthesizer job config
+        synth_config: dict[str, Any] = {
+            "enable_synthesis": True,
+            "enable_replace_pii": config.get("piiReplacement", True) if config else True,
+            "data": {
+                "holdout": 0.05,
+                "max_holdout": min(len(data) // 10, 2000),
+            },
+            "evaluation": {
+                "mia_enabled": config.get("runMiaEvaluation", True) if config else True,
+                "aia_enabled": config.get("runAiaEvaluation", True) if config else True,
+                "enabled": True,
+            },
+            "training": {
+                "pretrained_model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+                "num_input_records_to_sample": "auto",
+            },
+            "generation": {
+                "num_records": len(data),
+                "temperature": config.get("temperature", 0.9) if config else 0.9,
+            },
         }
-        if config:
-            default_config.update(config)
 
-        payload = {"data": data, "config": default_config}
+        # Add differential privacy if epsilon is specified
+        if config and config.get("epsilon"):
+            synth_config["privacy"] = {
+                "dp_enabled": True,
+                "epsilon": config["epsilon"],
+                "delta": config.get("delta", "auto"),
+            }
 
-        # Create job via NeMo Core API v1
+        # Create job payload
+        payload = {
+            "name": f"dagster-synth-{run_id}",
+            "spec": {
+                "data_source": data_source,
+                "config": synth_config,
+            },
+        }
+
+        # Create job via Safe Synthesizer API v1beta1
         response = requests.post(
-            f"{self.service_endpoint}/v1/jobs",
+            f"{self.service_endpoint}/v1beta1/safe-synthesizer/jobs",
             json=payload,
             timeout=60,
         )
         response.raise_for_status()
         job_response = response.json()
-        job_id = job_response.get("job_id") or job_response.get("id")
+        job_id = job_response.get("id")
 
         # Wait for completion
         start_time = time.time()
         while time.time() - start_time < self.max_wait_time:
             status_response = requests.get(
-                f"{self.service_endpoint}/v1/jobs/{job_id}",
+                f"{self.service_endpoint}/v1beta1/safe-synthesizer/jobs/{job_id}/status",
                 timeout=60,
             )
             status_response.raise_for_status()
             status = status_response.json()
 
-            if status.get("state") == "completed" or status.get("status") == "completed":
-                # Download results
-                results = status.get("results", [])
-                result_id = results[0].get("id") or results[0].get("name") if results else "output"
-                result_response = requests.get(
-                    f"{self.service_endpoint}/v1/jobs/{job_id}/results/{result_id}/download",
+            job_status = status.get("status")
+            if job_status == "completed":
+                # Download synthetic data
+                synth_response = requests.get(
+                    f"{self.service_endpoint}/v1beta1/safe-synthesizer/jobs/{job_id}/results/synthetic_data/download",
+                    timeout=120,
+                )
+                synth_response.raise_for_status()
+
+                # Parse parquet response
+                import io
+
+                import pandas as pd
+
+                synth_df = pd.read_parquet(io.BytesIO(synth_response.content))
+                synthetic_data = synth_df.to_dict("records")
+
+                # Get evaluation summary
+                summary_response = requests.get(
+                    f"{self.service_endpoint}/v1beta1/safe-synthesizer/jobs/{job_id}/results/summary/download",
                     timeout=60,
                 )
-                result_response.raise_for_status()
-                synthetic_data = result_response.json()
+                summary = {}
+                if summary_response.status_code == 200:
+                    summary = summary_response.json()
 
                 evaluation = {
                     "job_id": job_id,
-                    "mia_score": status.get("evaluation", {}).get("mia_score"),
-                    "aia_score": status.get("evaluation", {}).get("aia_score"),
-                    "privacy_passed": status.get("evaluation", {}).get(
-                        "privacy_passed", False
-                    ),
+                    "mia_score": summary.get("membership_inference_protection_score"),
+                    "aia_score": summary.get("attribute_inference_protection_score"),
+                    "privacy_passed": summary.get("data_privacy_score", 0) > 0.7,
+                    "quality_score": summary.get("synthetic_data_quality_score"),
                 }
 
                 return synthetic_data, evaluation
 
-            elif status.get("state") == "failed" or status.get("status") == "failed":
-                raise RuntimeError(f"Job {job_id} failed: {status.get('error') or status.get('message')}")
+            elif job_status in ("error", "cancelled"):
+                error_details = status.get("error_details", {})
+                raise RuntimeError(
+                    f"Job {job_id} failed with status {job_status}: {error_details}"
+                )
 
             time.sleep(self.poll_interval)
 

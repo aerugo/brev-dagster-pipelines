@@ -427,30 +427,32 @@ class SafeSynthesizerResource(ConfigurableResource):
 
         payload = {"data": data, "config": default_config}
 
-        # Create job
+        # Create job via NeMo Core API v1
         response = requests.post(
-            f"{self.service_endpoint}/jobs",
+            f"{self.service_endpoint}/v1/jobs",
             json=payload,
             timeout=60,
         )
         response.raise_for_status()
-        job_id = response.json()["job_id"]
+        job_response = response.json()
+        job_id = job_response.get("job_id") or job_response.get("id")
 
         # Wait for completion
         start_time = time.time()
         while time.time() - start_time < self.max_wait_time:
             status_response = requests.get(
-                f"{self.service_endpoint}/jobs/{job_id}",
+                f"{self.service_endpoint}/v1/jobs/{job_id}",
                 timeout=60,
             )
             status_response.raise_for_status()
             status = status_response.json()
 
-            if status["state"] == "completed":
+            if status.get("state") == "completed" or status.get("status") == "completed":
                 # Download results
-                result_id = status["results"][0]["id"]
+                results = status.get("results", [])
+                result_id = results[0].get("id") or results[0].get("name") if results else "output"
                 result_response = requests.get(
-                    f"{self.service_endpoint}/jobs/{job_id}/results/{result_id}/download",
+                    f"{self.service_endpoint}/v1/jobs/{job_id}/results/{result_id}/download",
                     timeout=60,
                 )
                 result_response.raise_for_status()
@@ -467,8 +469,8 @@ class SafeSynthesizerResource(ConfigurableResource):
 
                 return synthetic_data, evaluation
 
-            elif status["state"] == "failed":
-                raise RuntimeError(f"Job {job_id} failed: {status.get('error')}")
+            elif status.get("state") == "failed" or status.get("status") == "failed":
+                raise RuntimeError(f"Job {job_id} failed: {status.get('error') or status.get('message')}")
 
             time.sleep(self.poll_interval)
 

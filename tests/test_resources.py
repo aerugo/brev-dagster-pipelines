@@ -56,7 +56,7 @@ def test_nim_embedding_resource_init():
         endpoint="http://localhost:8000",
     )
     assert resource.endpoint == "http://localhost:8000"
-    assert resource.model == "nvidia/llama-3_2-nemoretriever-300m-embed-v2"
+    assert resource.model == "nvidia/nv-embedqa-e5-v5"
     assert resource.dimensions == 1024
 
 

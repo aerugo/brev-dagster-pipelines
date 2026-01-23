@@ -32,6 +32,14 @@ synthetic_full_run = define_asset_job(
     selection=SYNTHETIC_ASSETS,
 )
 
+# Full pipeline (real + synthetic) with all records
+# Must run all assets together since K8s pods don't share intermediate storage
+full_pipeline_full_run = define_asset_job(
+    name="full_pipeline_full_run",
+    description="Complete pipeline: Process all speeches and generate synthetic data",
+    selection=ALL_SPEECHES_ASSETS,
+)
+
 # =============================================================================
 # Trial Run Jobs (limited records for testing)
 # =============================================================================
@@ -73,5 +81,6 @@ all_jobs = [
     speeches_full_run,
     speeches_trial_run,
     synthetic_full_run,
+    full_pipeline_full_run,
     full_pipeline_trial_run,
 ]

@@ -69,20 +69,31 @@ def raw_speeches(
     Returns:
         Raw speeches DataFrame from Kaggle.
     """
+    import os
+
     import kagglehub
-    from kagglehub import KaggleDatasetAdapter
 
     context.log.info("Downloading central-bank-speeches dataset from Kaggle...")
 
-    # Load dataset using KaggleHub Polars adapter
-    lf = kagglehub.load_dataset(
-        KaggleDatasetAdapter.POLARS,
-        "davidgauthier/central-bank-speeches",
-        "",  # Load all files
-    )
+    # Download dataset first to get the local path
+    dataset_path = kagglehub.dataset_download("davidgauthier/central-bank-speeches")
+    context.log.info(f"Dataset downloaded to: {dataset_path}")
 
-    # Collect lazy frame to DataFrame
-    df = lf.collect()
+    # List files in the dataset
+    files = os.listdir(dataset_path)
+    context.log.info(f"Files in dataset: {files}")
+
+    # Find CSV file (most Kaggle datasets use CSV)
+    csv_files = [f for f in files if f.endswith(".csv")]
+    if not csv_files:
+        msg = f"No CSV files found in dataset. Available files: {files}"
+        raise ValueError(msg)
+
+    # Load the first CSV file
+    csv_path = os.path.join(dataset_path, csv_files[0])
+    context.log.info(f"Loading: {csv_path}")
+
+    df = pl.read_csv(csv_path)
     context.log.info(f"Loaded {len(df)} speeches from Kaggle")
 
     # Apply sample_size limit for trial runs

@@ -62,8 +62,8 @@ class SafeSynthesizerResource(ConfigurableResource):
         description="Safe Synthesizer API endpoint",
     )
     nds_endpoint: str = Field(
-        default="http://nemo-data-store.nvidia-ai.svc.cluster.local:3000/v1/hf",
-        description="NeMo Data Store HuggingFace-compatible endpoint",
+        default="http://nemo-data-store.nvidia-ai.svc.cluster.local:3000",
+        description="NeMo Data Store endpoint (Gitea-based HuggingFace-compatible)",
     )
     nds_token: str = Field(
         default="",
@@ -438,20 +438,19 @@ class SafeSynthesizerResource(ConfigurableResource):
     def _upload_to_nds(self, data: list[dict[str, Any]], run_id: str) -> str:
         """Upload data to NDS (NeMo Data Store) for Safe Synthesizer.
 
-        Uploads data as a parquet file to the HuggingFace-compatible data store.
+        Uploads data as a parquet file using Gitea's REST API.
 
         Args:
             data: Input data records to upload.
             run_id: Unique run identifier for the file name.
 
         Returns:
-            The HuggingFace-style repo path for the uploaded data.
+            The repo path for the uploaded data (e.g., admin/central-bank-speeches/input_xxx.parquet).
         """
+        import base64
         import io
-        import os
 
         import pandas as pd
-        from huggingface_hub import HfApi
 
         # Convert data to parquet bytes
         df = pd.DataFrame(data)
@@ -459,28 +458,42 @@ class SafeSynthesizerResource(ConfigurableResource):
         df.to_parquet(buffer, index=False)
         parquet_bytes = buffer.getvalue()
 
-        # Write to temp file for upload
-        temp_path = f"/tmp/synth_input_{run_id}.parquet"
-        with open(temp_path, "wb") as f:
-            f.write(parquet_bytes)
+        # Upload file via Gitea API
+        filename = f"input_{run_id}.parquet"
+        owner, repo = self.nds_repo.split("/")
 
+        # First, try to get existing file (for update)
+        get_url = f"{self.nds_endpoint}/api/v1/repos/{owner}/{repo}/contents/{filename}"
+        sha = None
         try:
-            # Initialize HuggingFace API with NDS endpoint
-            hf_api = HfApi(endpoint=self.nds_endpoint, token=self.nds_token)
-
-            # Upload file to repository
-            hf_api.upload_file(
-                path_or_fileobj=temp_path,
-                path_in_repo=f"input_{run_id}.parquet",
-                repo_id=self.nds_repo,
-                repo_type="dataset",
+            get_response = requests.get(
+                get_url,
+                headers={"Authorization": f"token {self.nds_token}"},
+                timeout=30,
             )
+            if get_response.status_code == 200:
+                sha = get_response.json().get("sha")
+        except Exception:
+            pass
 
-            return f"{self.nds_repo}/input_{run_id}.parquet"
-        finally:
-            # Clean up temp file
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+        # Upload/update file via Gitea contents API
+        upload_url = f"{self.nds_endpoint}/api/v1/repos/{owner}/{repo}/contents/{filename}"
+        payload: dict[str, Any] = {
+            "message": f"Add input data for run {run_id}",
+            "content": base64.b64encode(parquet_bytes).decode("utf-8"),
+        }
+        if sha:
+            payload["sha"] = sha
+
+        response = requests.post(
+            upload_url,
+            json=payload,
+            headers={"Authorization": f"token {self.nds_token}"},
+            timeout=120,
+        )
+        response.raise_for_status()
+
+        return f"{self.nds_repo}/{filename}"
 
     def _synthesize_via_api(
         self,

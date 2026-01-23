@@ -123,23 +123,29 @@ def raw_speeches(
         content=parquet_bytes,
     )
 
-    # Create commit for versioned raw data
-    commit = lakefs_client.commits_api.commit(
-        repository="data",
-        branch="main",
-        commit_creation=CommitCreation(
-            message=f"Ingest raw central bank speeches ({len(df)} records)",
-            metadata={
-                "dagster_run_id": context.run_id or "",
-                "source": "kaggle/davidgauthier/central-bank-speeches",
-                "num_records": str(len(df)),
-                "sample_size": str(config.sample_size) if config.sample_size > 0 else "full",
-            },
-        ),
-    )
+    # Create commit for versioned raw data (skip if no changes)
+    try:
+        commit = lakefs_client.commits_api.commit(
+            repository="data",
+            branch="main",
+            commit_creation=CommitCreation(
+                message=f"Ingest raw central bank speeches ({len(df)} records)",
+                metadata={
+                    "dagster_run_id": context.run_id or "",
+                    "source": "kaggle/davidgauthier/central-bank-speeches",
+                    "num_records": str(len(df)),
+                    "sample_size": str(config.sample_size) if config.sample_size > 0 else "full",
+                },
+            ),
+        )
+        context.log.info(f"LakeFS commit: {commit.id}")
+    except Exception as e:
+        if "no changes" in str(e).lower():
+            context.log.info("No changes to commit (data already exists in LakeFS)")
+        else:
+            raise
 
     context.log.info(f"Stored raw data to LakeFS: lakefs://data/main/{path}")
-    context.log.info(f"LakeFS commit: {commit.id}")
 
     # Log column info
     context.log.info(f"Columns: {df.columns}")
@@ -491,26 +497,33 @@ def speeches_data_product(
         content=parquet_bytes,
     )
 
-    # Create commit
+    # Create commit (skip if no changes)
     tariff_count = df.filter(pl.col("tariff_mention") == 1).height
-    commit = lakefs_client.commits_api.commit(
-        repository="data",
-        branch="main",
-        commit_creation=CommitCreation(
-            message=f"Update central bank speeches data product ({len(df)} records)",
-            metadata={
-                "dagster_run_id": context.run_id or "",
-                "num_records": str(len(df)),
-                "tariff_mentions": str(tariff_count),
-            },
-        ),
-    )
-
-    context.log.info(f"Committed to LakeFS: {commit.id}")
+    commit_id = None
+    try:
+        commit = lakefs_client.commits_api.commit(
+            repository="data",
+            branch="main",
+            commit_creation=CommitCreation(
+                message=f"Update central bank speeches data product ({len(df)} records)",
+                metadata={
+                    "dagster_run_id": context.run_id or "",
+                    "num_records": str(len(df)),
+                    "tariff_mentions": str(tariff_count),
+                },
+            ),
+        )
+        commit_id = commit.id
+        context.log.info(f"Committed to LakeFS: {commit_id}")
+    except Exception as e:
+        if "no changes" in str(e).lower():
+            context.log.info("No changes to commit (data already exists in LakeFS)")
+        else:
+            raise
 
     return {
         "path": f"lakefs://data/main/{path}",
-        "commit_id": commit.id,
+        "commit_id": commit_id,
         "num_records": len(df),
         "tariff_mentions": tariff_count,
     }

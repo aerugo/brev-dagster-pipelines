@@ -205,20 +205,26 @@ def synthetic_validation_report(
         content=report_bytes,
     )
 
-    # Commit
-    lakefs_client.commits_api.commit(
-        repository="data",
-        branch="main",
-        commit_creation=CommitCreation(
-            message="Add synthetic data validation report",
-            metadata={
-                "dagster_run_id": context.run_id or "",
-                "mia_score": str(report.get("avg_mia_score", "")),
-                "aia_score": str(report.get("avg_aia_score", "")),
-                "privacy_passed": str(report.get("all_privacy_passed", "")),
-            },
-        ),
-    )
+    # Commit (skip if no changes)
+    try:
+        lakefs_client.commits_api.commit(
+            repository="data",
+            branch="main",
+            commit_creation=CommitCreation(
+                message="Add synthetic data validation report",
+                metadata={
+                    "dagster_run_id": context.run_id or "",
+                    "mia_score": str(report.get("avg_mia_score", "")),
+                    "aia_score": str(report.get("avg_aia_score", "")),
+                    "privacy_passed": str(report.get("all_privacy_passed", "")),
+                },
+            ),
+        )
+    except Exception as e:
+        if "no changes" in str(e).lower():
+            context.log.info("No changes to commit (report already exists in LakeFS)")
+        else:
+            raise
 
     context.log.info(f"Stored validation report to lakefs://data/main/{report_path}")
 
@@ -327,24 +333,31 @@ def synthetic_data_product(
         content=parquet_bytes,
     )
 
-    commit = lakefs_client.commits_api.commit(
-        repository="data",
-        branch="main",
-        commit_creation=CommitCreation(
-            message=f"Update synthetic speeches data product ({len(df)} records)",
-            metadata={
-                "dagster_run_id": context.run_id or "",
-                "num_records": str(len(df)),
-                "is_synthetic": "true",
-            },
-        ),
-    )
-
-    context.log.info(f"Committed synthetic data to LakeFS: {commit.id}")
+    commit_id = None
+    try:
+        commit = lakefs_client.commits_api.commit(
+            repository="data",
+            branch="main",
+            commit_creation=CommitCreation(
+                message=f"Update synthetic speeches data product ({len(df)} records)",
+                metadata={
+                    "dagster_run_id": context.run_id or "",
+                    "num_records": str(len(df)),
+                    "is_synthetic": "true",
+                },
+            ),
+        )
+        commit_id = commit.id
+        context.log.info(f"Committed synthetic data to LakeFS: {commit_id}")
+    except Exception as e:
+        if "no changes" in str(e).lower():
+            context.log.info("No changes to commit (data already exists in LakeFS)")
+        else:
+            raise
 
     return {
         "path": f"lakefs://data/main/{path}",
-        "commit_id": commit.id,
+        "commit_id": commit_id,
         "num_records": len(df),
     }
 

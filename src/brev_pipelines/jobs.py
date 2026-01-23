@@ -3,7 +3,8 @@
 Provides pre-configured jobs for common pipeline operations:
 - speeches_full_run: Process all records
 - speeches_trial_run: Process only 10 records for testing
-- synthetic_trial_run: Generate synthetic data for 10 records
+- synthetic_full_run: Generate synthetic data for all records
+- full_pipeline_trial_run: Complete pipeline with 10 records
 """
 
 from dagster import AssetSelection, define_asset_job
@@ -35,43 +36,24 @@ synthetic_full_run = define_asset_job(
 # Trial Run Jobs (limited records for testing)
 # =============================================================================
 
+# Trial run for speeches pipeline only (10 records)
 speeches_trial_run = define_asset_job(
     name="speeches_trial_run",
     description="Trial run: Process only 10 speeches for testing",
     selection=SPEECHES_ASSETS,
     config={
-        "ops": {
-            "raw_speeches": {
-                "config": TRIAL_RUN_CONFIG,
-            },
-        },
+        "raw_speeches": TRIAL_RUN_CONFIG,
     },
 )
 
-synthetic_trial_run = define_asset_job(
-    name="synthetic_trial_run",
-    description="Trial run: Generate synthetic data for 10 speeches",
-    selection=SYNTHETIC_ASSETS,
-    config={
-        "ops": {
-            "raw_speeches": {
-                "config": TRIAL_RUN_CONFIG,
-            },
-        },
-    },
-)
-
-# Full pipeline trial run (real + synthetic)
+# Full pipeline trial run (real + synthetic, 10 records)
+# Must include all assets since synthetic depends on enriched_speeches
 full_pipeline_trial_run = define_asset_job(
     name="full_pipeline_trial_run",
     description="Trial run: Complete pipeline (real + synthetic) with 10 records",
     selection=ALL_SPEECHES_ASSETS,
     config={
-        "ops": {
-            "raw_speeches": {
-                "config": TRIAL_RUN_CONFIG,
-            },
-        },
+        "raw_speeches": TRIAL_RUN_CONFIG,
     },
 )
 
@@ -80,6 +62,5 @@ all_jobs = [
     speeches_full_run,
     speeches_trial_run,
     synthetic_full_run,
-    synthetic_trial_run,
     full_pipeline_trial_run,
 ]

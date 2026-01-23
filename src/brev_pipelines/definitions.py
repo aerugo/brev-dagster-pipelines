@@ -53,9 +53,16 @@ defs = Definitions(
             namespace=os.getenv("SAFE_SYNTH_NAMESPACE", "nvidia-ai"),
             service_endpoint=os.getenv(
                 "SAFE_SYNTH_ENDPOINT",
-                "http://nvidia-safe-synth.nvidia-ai.svc.cluster.local:8080",
+                "http://nvidia-safe-synth-safe-synthesizer.nvidia-ai.svc.cluster.local:8080",
             ),
+            nds_endpoint=os.getenv(
+                "NDS_ENDPOINT",
+                "http://nvidia-safe-synth-data-store.nvidia-ai.svc.cluster.local:3000/v1/hf",
+            ),
+            nds_token=os.getenv("HF_TOKEN", ""),
+            nds_repo=os.getenv("NDS_REPO", "admin/central-bank-speeches"),
             priority_class=os.getenv("SAFE_SYNTH_PRIORITY", "batch-high"),
+            mock_mode=os.getenv("SAFE_SYNTH_MOCK_MODE", "true").lower() == "true",
         ),
         "weaviate": WeaviateResource(
             host=os.getenv("WEAVIATE_HOST", "weaviate.weaviate.svc.cluster.local"),

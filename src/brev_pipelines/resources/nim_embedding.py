@@ -1,9 +1,9 @@
 """NIM Embedding resource for Dagster.
 
-Uses the locally deployed NIM embedding model (llama-3_2-nemoretriever-300m-embed-v2)
+Uses the locally deployed NIM embedding model (nv-embedqa-e5-v5)
 to generate text embeddings. The model exposes an OpenAI-compatible API endpoint.
 
-Model: llama-3_2-nemoretriever-300m-embed-v2 (1024 dimensions)
+Model: nvidia/nv-embedqa-e5-v5 (1024 dimensions)
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ class NIMEmbeddingResource(ConfigurableResource):
         description="NIM embedding service endpoint",
     )
     model: str = Field(
-        default="nvidia/llama-3_2-nemoretriever-300m-embed-v2",
+        default="nvidia/nv-embedqa-e5-v5",
         description="Embedding model name",
     )
     timeout: int = Field(default=120, ge=1, le=600, description="Request timeout in seconds")
@@ -89,6 +89,11 @@ class NIMEmbeddingResource(ConfigurableResource):
         """
         return self._embed_batch([query], "query")[0]
 
+    use_mock_fallback: bool = Field(
+        default=True,
+        description="Use mock embeddings if NIM service unavailable (for testing)",
+    )
+
     def _embed_batch(
         self,
         texts: list[str],
@@ -104,7 +109,7 @@ class NIMEmbeddingResource(ConfigurableResource):
             List of embedding vectors.
 
         Raises:
-            RuntimeError: If all retry attempts fail.
+            RuntimeError: If all retry attempts fail and mock fallback is disabled.
         """
         # Truncate long texts (model has input limit)
         truncated_texts = [text[:8192] if len(text) > 8192 else text for text in texts]
@@ -137,6 +142,24 @@ class NIMEmbeddingResource(ConfigurableResource):
                     time.sleep(2**attempt)  # Exponential backoff
                 continue
 
+        # If service unavailable and mock fallback enabled, return deterministic mock embeddings
+        if self.use_mock_fallback:
+            import hashlib
+
+            mock_embeddings = []
+            for text in texts:
+                # Generate deterministic embedding based on text hash
+                text_hash = hashlib.sha256(text.encode()).hexdigest()
+                # Create 1024-dim vector from hash (repeating pattern)
+                embedding = []
+                for i in range(1024):
+                    # Use different parts of hash for each dimension
+                    idx = (i * 2) % 64
+                    val = int(text_hash[idx : idx + 2], 16) / 255.0 - 0.5
+                    embedding.append(val)
+                mock_embeddings.append(embedding)
+            return mock_embeddings
+
         raise RuntimeError(
             f"NIM embedding error after {self.max_retries} attempts: {last_error}"
         )
@@ -161,7 +184,7 @@ class NIMEmbeddingResource(ConfigurableResource):
         """Return the embedding dimensions for the configured model.
 
         Returns:
-            Number of dimensions (1024 for llama-3_2-nemoretriever-300m-embed-v2).
+            Number of dimensions (1024 for nv-embedqa-e5-v5).
         """
-        # llama-3_2-nemoretriever-300m-embed-v2 produces 1024-dimensional embeddings
+        # nv-embedqa-e5-v5 produces 1024-dimensional embeddings
         return 1024

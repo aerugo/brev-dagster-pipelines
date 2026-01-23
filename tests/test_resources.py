@@ -194,17 +194,3 @@ class TestSafeSynthesizerResource:
         # batch-high (130) > inference (125) allows preemption
         assert resource.priority_class == "batch-high"
         assert resource.gpu_memory == "80Gi"
-
-    def test_mock_mode_default(self):
-        """Test mock mode is enabled by default for testing."""
-        from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
-
-        resource = SafeSynthesizerResource()
-        assert resource.mock_mode is True
-
-    def test_mock_mode_disabled(self):
-        """Test mock mode can be disabled for production use."""
-        from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
-
-        resource = SafeSynthesizerResource(mock_mode=False)
-        assert resource.mock_mode is False

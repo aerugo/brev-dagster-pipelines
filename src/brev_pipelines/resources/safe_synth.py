@@ -26,10 +26,9 @@ from pydantic import Field
 class SafeSynthesizerResource(ConfigurableResource):
     """NVIDIA Safe Synthesizer resource using Kubernetes Jobs.
 
-    Supports three modes:
+    Supports two modes:
     1. API mode: Calls Safe Synthesizer service API (requires NDS data upload)
     2. Job mode: Creates Kubernetes Jobs for on-demand synthesis
-    3. Mock mode: Generates mock synthetic data for testing (no GPU required)
 
     Attributes:
         namespace: Kubernetes namespace for Safe Synthesizer jobs.
@@ -42,7 +41,6 @@ class SafeSynthesizerResource(ConfigurableResource):
         max_wait_time: Maximum wait time for job completion in seconds.
         gpu_memory: GPU memory allocation for KAI Scheduler.
         priority_class: Kubernetes priority class for preemption.
-        mock_mode: Use mock synthesis for testing (no GPU/API required).
     """
 
     namespace: str = Field(
@@ -88,10 +86,6 @@ class SafeSynthesizerResource(ConfigurableResource):
     priority_class: str = Field(
         default="batch-high",
         description="Kubernetes priority class for preemption",
-    )
-    mock_mode: bool = Field(
-        default=True,
-        description="Use mock synthesis for testing (no GPU/API required)",
     )
 
     def _get_k8s_batch_client(self) -> Any:
@@ -406,8 +400,6 @@ class SafeSynthesizerResource(ConfigurableResource):
 
         No manual intervention required!
 
-        If mock_mode is True, generates mock synthetic data without GPU/API.
-
         Args:
             input_data: Input data records.
             run_id: Unique run identifier.
@@ -416,10 +408,6 @@ class SafeSynthesizerResource(ConfigurableResource):
         Returns:
             Tuple of (synthetic_data, evaluation_report).
         """
-        # Use mock mode for testing without GPU/API
-        if self.mock_mode:
-            return self._synthesize_mock(input_data, config)
-
         # Check if already running
         already_running = self.health_check()
 
@@ -621,7 +609,8 @@ size {file_size}
         # Upload data to NDS
         data_source = self._upload_to_nds(data, run_id)
 
-        # Build Safe Synthesizer job config
+        # Build Safe Synthesizer job config with memory-optimized settings
+        # Lower max_vram_fraction leaves room for evaluation models (sentence_transformers)
         synth_config: dict[str, Any] = {
             "enable_synthesis": True,
             "enable_replace_pii": config.get("piiReplacement", True) if config else True,
@@ -633,10 +622,16 @@ size {file_size}
                 "mia_enabled": config.get("runMiaEvaluation", True) if config else True,
                 "aia_enabled": config.get("runAiaEvaluation", True) if config else True,
                 "enabled": True,
+                # Reduce evaluation rows to prevent CUDA OOM
+                "sqs_report_rows": 1000,
             },
             "training": {
                 "pretrained_model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
                 "num_input_records_to_sample": "auto",
+                # Memory optimization: leave 40% VRAM for evaluation
+                "max_vram_fraction": 0.6,
+                "batch_size": 1,
+                "gradient_accumulation_steps": 8,
             },
             "generation": {
                 "num_records": len(data),
@@ -728,68 +723,6 @@ size {file_size}
         raise TimeoutError(
             f"Job {job_id} did not complete in {self.max_wait_time} seconds"
         )
-
-    def _synthesize_mock(
-        self,
-        data: list[dict[str, Any]],
-        config: dict[str, Any] | None = None,
-    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Generate mock synthetic data for testing.
-
-        Creates synthetic copies of input records with minor text modifications
-        to simulate privacy-preserving synthesis. Useful for testing the pipeline
-        without requiring GPU or Safe Synthesizer API access.
-
-        Args:
-            data: Input data records.
-            config: Optional configuration (ignored in mock mode).
-
-        Returns:
-            Tuple of (synthetic_data, mock_evaluation_report).
-        """
-        import hashlib
-        import random
-
-        synthetic_data: list[dict[str, Any]] = []
-
-        for i, record in enumerate(data):
-            # Create a synthetic copy with modified text
-            synthetic_record = {}
-
-            for key, value in record.items():
-                if key == "text" and isinstance(value, str):
-                    # Add synthetic prefix and slight text modification
-                    words = value.split()
-                    # Shuffle some words to simulate synthesis
-                    if len(words) > 10:
-                        random.seed(i)  # Reproducible for testing
-                        mid = len(words) // 2
-                        shuffled = words[:5] + words[mid : mid + 5] + words[5:mid] + words[mid + 5 :]
-                        synthetic_record[key] = " ".join(shuffled)
-                    else:
-                        synthetic_record[key] = f"[SYNTHETIC] {value}"
-                elif key == "title" and isinstance(value, str):
-                    synthetic_record[key] = f"{value} (Synthetic)"
-                elif key == "speaker" and isinstance(value, str):
-                    # Replace speaker name with pseudonym
-                    name_hash = hashlib.md5(value.encode()).hexdigest()[:6]
-                    synthetic_record[key] = f"Speaker_{name_hash.upper()}"
-                else:
-                    synthetic_record[key] = value
-
-            synthetic_data.append(synthetic_record)
-
-        # Mock evaluation report with good scores
-        evaluation = {
-            "job_id": f"mock-{random.randint(1000, 9999)}",
-            "mia_score": 0.95,  # High = good privacy (low attack success)
-            "aia_score": 0.92,  # High = good privacy
-            "privacy_passed": True,
-            "mock_mode": True,
-            "records_processed": len(data),
-        }
-
-        return synthetic_data, evaluation
 
     def health_check(self) -> bool:
         """Check if Safe Synthesizer service is healthy."""

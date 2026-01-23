@@ -62,7 +62,6 @@ defs = Definitions(
             nds_token=os.getenv("HF_TOKEN", ""),
             nds_repo=os.getenv("NDS_REPO", "admin/central-bank-speeches"),
             priority_class=os.getenv("SAFE_SYNTH_PRIORITY", "batch-high"),
-            mock_mode=os.getenv("SAFE_SYNTH_MOCK_MODE", "true").lower() == "true",
         ),
         "weaviate": WeaviateResource(
             host=os.getenv("WEAVIATE_HOST", "weaviate.weaviate.svc.cluster.local"),

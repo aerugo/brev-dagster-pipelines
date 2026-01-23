@@ -42,7 +42,11 @@ speeches_trial_run = define_asset_job(
     description="Trial run: Process only 10 speeches for testing",
     selection=SPEECHES_ASSETS,
     config={
-        "raw_speeches": TRIAL_RUN_CONFIG,
+        "ops": {
+            "raw_speeches": {
+                "config": TRIAL_RUN_CONFIG,
+            },
+        },
     },
 )
 
@@ -53,7 +57,11 @@ full_pipeline_trial_run = define_asset_job(
     description="Trial run: Complete pipeline (real + synthetic) with 10 records",
     selection=ALL_SPEECHES_ASSETS,
     config={
-        "raw_speeches": TRIAL_RUN_CONFIG,
+        "ops": {
+            "raw_speeches": {
+                "config": TRIAL_RUN_CONFIG,
+            },
+        },
     },
 )
 

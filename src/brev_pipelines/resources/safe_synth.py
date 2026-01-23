@@ -493,7 +493,9 @@ class SafeSynthesizerResource(ConfigurableResource):
         )
         response.raise_for_status()
 
-        return f"{self.nds_repo}/{filename}"
+        # Return HuggingFace-style URL as expected by Safe Synthesizer
+        # Format: hf://datasets/{repo-namespace}/{repo-name}/{filename}
+        return f"hf://datasets/{self.nds_repo}/{filename}"
 
     def _synthesize_via_api(
         self,

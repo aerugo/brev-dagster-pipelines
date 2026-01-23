@@ -45,7 +45,7 @@ class SafeSynthesizerResource(ConfigurableResource):
         description="Kubernetes namespace for Safe Synthesizer",
     )
     deployment_name: str = Field(
-        default="nemo-safe-synthesizer",
+        default="nvidia-safe-synth-safe-synthesizer",
         description="Kubernetes deployment name for Safe Synthesizer",
     )
     image: str = Field(
@@ -53,8 +53,8 @@ class SafeSynthesizerResource(ConfigurableResource):
         description="Safe Synthesizer container image",
     )
     service_endpoint: str = Field(
-        default="http://nemo-safe-synthesizer.nvidia-ai.svc.cluster.local:8000",
-        description="Safe Synthesizer service endpoint",
+        default="http://nemo-core-api.nvidia-ai.svc.cluster.local:8000",
+        description="NeMo Core API endpoint for Safe Synthesizer",
     )
     poll_interval: int = Field(
         default=30,

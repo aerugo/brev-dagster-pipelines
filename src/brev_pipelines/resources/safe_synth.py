@@ -3,11 +3,13 @@
 Manages Safe Synthesizer deployment with automatic GPU time-sharing.
 Uses KAI Scheduler priority-based preemption for GPU orchestration.
 
+Uses NVIDIA's official NeMo Microservices Helm Chart (nemo-safe-synthesizer).
+
 How it works:
-1. Dagster scales safe-synth deployment from 0 to 1 replica
+1. Dagster scales nemo-safe-synthesizer deployment from 0 to 1 replica
 2. KAI Scheduler preempts nim-llm (priority 125) for safe-synth (priority 130)
 3. Safe Synthesizer runs the synthesis job
-4. Dagster scales safe-synth back to 0 replicas
+4. Dagster scales nemo-safe-synthesizer back to 0 replicas
 5. nim-llm automatically restarts
 6. No manual intervention required!
 """
@@ -42,12 +44,16 @@ class SafeSynthesizerResource(ConfigurableResource):
         default="nvidia-ai",
         description="Kubernetes namespace for Safe Synthesizer",
     )
+    deployment_name: str = Field(
+        default="nemo-safe-synthesizer",
+        description="Kubernetes deployment name for Safe Synthesizer",
+    )
     image: str = Field(
-        default="nvcr.io/nvidia/nemo-microservices/safe-synthesizer:25.01",
+        default="nvcr.io/nvidia/nemo-microservices/safe-synthesizer:25.12",
         description="Safe Synthesizer container image",
     )
     service_endpoint: str = Field(
-        default="http://nvidia-safe-synth.nvidia-ai.svc.cluster.local:8080",
+        default="http://nemo-safe-synthesizer.nvidia-ai.svc.cluster.local:8000",
         description="Safe Synthesizer service endpoint",
     )
     poll_interval: int = Field(
@@ -98,20 +104,20 @@ class SafeSynthesizerResource(ConfigurableResource):
         return client.AppsV1Api()
 
     def _scale_deployment(self, replicas: int) -> None:
-        """Scale the safe-synth deployment.
+        """Scale the nemo-safe-synthesizer deployment.
 
         Args:
             replicas: Target replica count (0 or 1).
         """
         apps_api = self._get_k8s_apps_client()
         apps_api.patch_namespaced_deployment_scale(
-            name="safe-synth",
+            name=self.deployment_name,
             namespace=self.namespace,
             body={"spec": {"replicas": replicas}},
         )
 
     def _wait_for_ready(self, timeout: int = 600) -> bool:
-        """Wait for safe-synth deployment to be ready.
+        """Wait for nemo-safe-synthesizer deployment to be ready.
 
         Args:
             timeout: Maximum wait time in seconds.
@@ -124,7 +130,7 @@ class SafeSynthesizerResource(ConfigurableResource):
 
         while time.time() - start_time < timeout:
             deployment = apps_api.read_namespaced_deployment(
-                name="safe-synth",
+                name=self.deployment_name,
                 namespace=self.namespace,
             )
             if (
@@ -143,7 +149,7 @@ class SafeSynthesizerResource(ConfigurableResource):
             time.sleep(10)
 
         raise TimeoutError(
-            f"safe-synth deployment not ready after {timeout} seconds"
+            f"{self.deployment_name} deployment not ready after {timeout} seconds"
         )
 
     def create_synthesis_job(

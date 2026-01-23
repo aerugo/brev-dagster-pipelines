@@ -27,7 +27,6 @@ import polars as pl
 
 from brev_pipelines.config import PipelineConfig
 from brev_pipelines.resources.lakefs import LakeFSResource
-from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.nim import NIMResource
 from brev_pipelines.resources.nim_embedding import NIMEmbeddingResource
 from brev_pipelines.resources.weaviate import WeaviateResource
@@ -50,21 +49,23 @@ SPEECHES_SCHEMA: list[dict[str, str]] = [
     metadata={
         "layer": "raw",
         "source": "kaggle/davidgauthier/central-bank-speeches",
+        "destination": "lakefs",
     },
 )
 def raw_speeches(
     context: dg.AssetExecutionContext,
     config: PipelineConfig,
-    minio: MinIOResource,
+    lakefs: LakeFSResource,
 ) -> pl.DataFrame:
     """Ingest central bank speeches dataset from Kaggle.
 
-    Downloads the dataset using KaggleHub and stores raw data in MinIO.
+    Downloads the dataset using KaggleHub and stores raw data in LakeFS
+    for version control of source material.
 
     Args:
         context: Dagster execution context for logging.
         config: Pipeline configuration (sample_size for trial runs).
-        minio: MinIO resource for raw data storage.
+        lakefs: LakeFS resource for versioned data storage.
 
     Returns:
         Raw speeches DataFrame from Kaggle.
@@ -72,6 +73,7 @@ def raw_speeches(
     import os
 
     import kagglehub
+    from lakefs_sdk.models import CommitCreation
 
     context.log.info("Downloading central-bank-speeches dataset from Kaggle...")
 
@@ -104,26 +106,40 @@ def raw_speeches(
             f"TRIAL RUN: Limited to {config.sample_size} records (from {original_count})"
         )
 
-    # Store raw data in MinIO
-    minio.ensure_bucket("raw-data")
-    client = minio.get_client()
-
-    # Save as Parquet to MinIO
+    # Serialize to Parquet
     buffer = io.BytesIO()
     df.write_parquet(buffer)
     parquet_bytes = buffer.getvalue()
 
-    client.put_object(
-        "raw-data",
-        "central-bank-speeches/raw_speeches.parquet",
-        io.BytesIO(parquet_bytes),
-        len(parquet_bytes),
-        content_type="application/octet-stream",
+    # Get LakeFS client
+    lakefs_client = lakefs.get_client()
+
+    # Upload raw data to LakeFS
+    path = "central-bank-speeches/raw_speeches.parquet"
+    lakefs_client.objects_api.upload_object(
+        repository="data",
+        branch="main",
+        path=path,
+        content=parquet_bytes,
     )
 
-    context.log.info(
-        "Stored raw data to MinIO: raw-data/central-bank-speeches/raw_speeches.parquet"
+    # Create commit for versioned raw data
+    commit = lakefs_client.commits_api.commit(
+        repository="data",
+        branch="main",
+        commit_creation=CommitCreation(
+            message=f"Ingest raw central bank speeches ({len(df)} records)",
+            metadata={
+                "dagster_run_id": context.run_id or "",
+                "source": "kaggle/davidgauthier/central-bank-speeches",
+                "num_records": str(len(df)),
+                "sample_size": str(config.sample_size) if config.sample_size > 0 else "full",
+            },
+        ),
     )
+
+    context.log.info(f"Stored raw data to LakeFS: lakefs://data/main/{path}")
+    context.log.info(f"LakeFS commit: {commit.id}")
 
     # Log column info
     context.log.info(f"Columns: {df.columns}")

@@ -19,6 +19,7 @@ from typing import Any
 import dagster as dg
 import polars as pl
 
+from brev_pipelines.config import PipelineConfig
 from brev_pipelines.resources.lakefs import LakeFSResource
 from brev_pipelines.resources.nim_embedding import NIMEmbeddingResource
 from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
@@ -280,13 +281,17 @@ def synthetic_embeddings(
 )
 def synthetic_data_product(
     context: dg.AssetExecutionContext,
+    config: PipelineConfig,
     synthetic_speeches: tuple[pl.DataFrame, dict[str, Any]],
     lakefs: LakeFSResource,
 ) -> dict[str, Any]:
     """Store synthetic speeches as versioned data product in LakeFS.
 
+    Uses trial-specific path when is_trial=True to keep trial data separate.
+
     Args:
         context: Dagster execution context for logging.
+        config: Pipeline configuration (is_trial for path selection).
         synthetic_speeches: Tuple of (synthetic DataFrame, evaluation).
         lakefs: LakeFS resource for data versioning.
 
@@ -307,9 +312,13 @@ def synthetic_data_product(
     df.write_parquet(buffer)
     parquet_bytes = buffer.getvalue()
 
-    # Store in LakeFS
+    # Store in LakeFS - use trial path if is_trial
     lakefs_client = lakefs.get_client()
-    path = "central-bank-speeches/synthetic/speeches.parquet"
+    if config.is_trial:
+        path = "central-bank-speeches/synthetic/trial/speeches.parquet"
+        context.log.info("TRIAL RUN: Using trial-specific LakeFS path for synthetic data")
+    else:
+        path = "central-bank-speeches/synthetic/speeches.parquet"
 
     lakefs_client.objects_api.upload_object(
         repository="data",
@@ -350,6 +359,7 @@ def synthetic_data_product(
 )
 def synthetic_weaviate_index(
     context: dg.AssetExecutionContext,
+    config: PipelineConfig,
     synthetic_embeddings: tuple[pl.DataFrame, list[list[float]]],
     weaviate: WeaviateResource,
 ) -> dict[str, Any]:
@@ -357,9 +367,11 @@ def synthetic_weaviate_index(
 
     Creates SyntheticSpeeches collection (separate from CentralBankSpeeches)
     per INV-P004 (Synthetic Data Isolation).
+    Uses trial-specific collection when is_trial=True.
 
     Args:
         context: Dagster execution context for logging.
+        config: Pipeline configuration (is_trial for collection selection).
         synthetic_embeddings: Tuple of (DataFrame, embeddings) from embedding step.
         weaviate: Weaviate resource for vector storage.
 
@@ -368,9 +380,16 @@ def synthetic_weaviate_index(
     """
     df, embeddings = synthetic_embeddings
 
+    # Use trial collection if is_trial
+    if config.is_trial:
+        collection_name = "SyntheticSpeechesTrial"
+        context.log.info("TRIAL RUN: Using trial-specific Weaviate collection for synthetic data")
+    else:
+        collection_name = "SyntheticSpeeches"
+
     # Ensure collection exists
     weaviate.ensure_collection(
-        name="SyntheticSpeeches",
+        name=collection_name,
         properties=SYNTHETIC_SCHEMA,
         vector_dimensions=len(embeddings[0]),
     )
@@ -393,15 +412,15 @@ def synthetic_weaviate_index(
 
     # Insert objects with embeddings
     count = weaviate.insert_objects(
-        collection_name="SyntheticSpeeches",
+        collection_name=collection_name,
         objects=objects,
         vectors=embeddings,
     )
 
-    context.log.info(f"Indexed {count} synthetic speeches in Weaviate")
+    context.log.info(f"Indexed {count} synthetic speeches in Weaviate collection: {collection_name}")
 
     return {
-        "collection": "SyntheticSpeeches",
+        "collection": collection_name,
         "object_count": count,
         "vector_dimensions": len(embeddings[0]),
     }

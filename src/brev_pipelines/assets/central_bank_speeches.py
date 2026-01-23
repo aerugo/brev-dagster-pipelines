@@ -448,15 +448,18 @@ def enriched_speeches(
 )
 def speeches_data_product(
     context: dg.AssetExecutionContext,
+    config: PipelineConfig,
     enriched_speeches: pl.DataFrame,
     lakefs: LakeFSResource,
 ) -> dict[str, Any]:
     """Store final data product in LakeFS with versioning.
 
     Creates a versioned Parquet file in LakeFS for downstream consumption.
+    Uses trial-specific path when is_trial=True to keep trial data separate.
 
     Args:
         context: Dagster execution context for logging.
+        config: Pipeline configuration (is_trial for path selection).
         enriched_speeches: Final enriched DataFrame.
         lakefs: LakeFS resource for data versioning.
 
@@ -475,8 +478,12 @@ def speeches_data_product(
     # Get LakeFS client
     lakefs_client = lakefs.get_client()
 
-    # Upload to LakeFS
-    path = "central-bank-speeches/speeches.parquet"
+    # Upload to LakeFS - use trial path if is_trial
+    if config.is_trial:
+        path = "central-bank-speeches/trial/speeches.parquet"
+        context.log.info("TRIAL RUN: Using trial-specific LakeFS path")
+    else:
+        path = "central-bank-speeches/speeches.parquet"
     lakefs_client.objects_api.upload_object(
         repository="data",
         branch="main",
@@ -519,6 +526,7 @@ def speeches_data_product(
 )
 def weaviate_index(
     context: dg.AssetExecutionContext,
+    config: PipelineConfig,
     speech_embeddings: tuple[pl.DataFrame, list[list[float]]],
     tariff_classification: pl.DataFrame,
     weaviate: WeaviateResource,
@@ -527,9 +535,11 @@ def weaviate_index(
 
     Creates the CentralBankSpeeches collection and inserts all speeches
     with their embeddings for similarity search.
+    Uses trial-specific collection when is_trial=True.
 
     Args:
         context: Dagster execution context for logging.
+        config: Pipeline configuration (is_trial for collection selection).
         speech_embeddings: Tuple of (DataFrame, embeddings) from embedding step.
         tariff_classification: DataFrame with tariff classification results.
         weaviate: Weaviate resource for vector storage.
@@ -546,9 +556,16 @@ def weaviate_index(
         how="left",
     )
 
+    # Use trial collection if is_trial
+    if config.is_trial:
+        collection_name = "CentralBankSpeechesTrial"
+        context.log.info("TRIAL RUN: Using trial-specific Weaviate collection")
+    else:
+        collection_name = "CentralBankSpeeches"
+
     # Ensure collection exists
     weaviate.ensure_collection(
-        name="CentralBankSpeeches",
+        name=collection_name,
         properties=SPEECHES_SCHEMA,
         vector_dimensions=len(embeddings[0]),
     )
@@ -570,15 +587,15 @@ def weaviate_index(
 
     # Insert objects with embeddings
     count = weaviate.insert_objects(
-        collection_name="CentralBankSpeeches",
+        collection_name=collection_name,
         objects=objects,
         vectors=embeddings,
     )
 
-    context.log.info(f"Indexed {count} speeches in Weaviate")
+    context.log.info(f"Indexed {count} speeches in Weaviate collection: {collection_name}")
 
     return {
-        "collection": "CentralBankSpeeches",
+        "collection": collection_name,
         "object_count": count,
         "vector_dimensions": len(embeddings[0]),
     }

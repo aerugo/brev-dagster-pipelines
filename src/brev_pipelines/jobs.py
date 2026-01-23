@@ -37,15 +37,16 @@ synthetic_full_run = define_asset_job(
 # =============================================================================
 
 # Trial run for speeches pipeline only (10 records)
+# Config is passed to all assets that need it (raw_speeches, speeches_data_product, weaviate_index)
 speeches_trial_run = define_asset_job(
     name="speeches_trial_run",
-    description="Trial run: Process only 10 speeches for testing",
+    description="Trial run: Process only 10 speeches for testing (separate collections/paths)",
     selection=SPEECHES_ASSETS,
     config={
         "ops": {
-            "raw_speeches": {
-                "config": TRIAL_RUN_CONFIG,
-            },
+            "raw_speeches": {"config": TRIAL_RUN_CONFIG},
+            "speeches_data_product": {"config": TRIAL_RUN_CONFIG},
+            "weaviate_index": {"config": TRIAL_RUN_CONFIG},
         },
     },
 )
@@ -54,13 +55,15 @@ speeches_trial_run = define_asset_job(
 # Must include all assets since synthetic depends on enriched_speeches
 full_pipeline_trial_run = define_asset_job(
     name="full_pipeline_trial_run",
-    description="Trial run: Complete pipeline (real + synthetic) with 10 records",
+    description="Trial run: Complete pipeline (real + synthetic) with 10 records (separate collections/paths)",
     selection=ALL_SPEECHES_ASSETS,
     config={
         "ops": {
-            "raw_speeches": {
-                "config": TRIAL_RUN_CONFIG,
-            },
+            "raw_speeches": {"config": TRIAL_RUN_CONFIG},
+            "speeches_data_product": {"config": TRIAL_RUN_CONFIG},
+            "weaviate_index": {"config": TRIAL_RUN_CONFIG},
+            "synthetic_data_product": {"config": TRIAL_RUN_CONFIG},
+            "synthetic_weaviate_index": {"config": TRIAL_RUN_CONFIG},
         },
     },
 )

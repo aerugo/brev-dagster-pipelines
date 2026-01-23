@@ -159,11 +159,11 @@ class TestSafeSynthesizerResource:
         assert resource.namespace == "custom-namespace"
 
     def test_service_endpoint_default(self):
-        """Test default service endpoint uses NeMo Core API."""
+        """Test default service endpoint uses Safe Synthesizer API."""
         from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
 
         resource = SafeSynthesizerResource()
-        assert "nemo-core-api" in resource.service_endpoint
+        assert "nemo-safe-synthesizer" in resource.service_endpoint
         assert "8000" in resource.service_endpoint
 
     def test_custom_service_endpoint(self):
@@ -194,3 +194,17 @@ class TestSafeSynthesizerResource:
         # batch-high (130) > inference (125) allows preemption
         assert resource.priority_class == "batch-high"
         assert resource.gpu_memory == "80Gi"
+
+    def test_mock_mode_default(self):
+        """Test mock mode is enabled by default for testing."""
+        from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
+
+        resource = SafeSynthesizerResource()
+        assert resource.mock_mode is True
+
+    def test_mock_mode_disabled(self):
+        """Test mock mode can be disabled for production use."""
+        from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
+
+        resource = SafeSynthesizerResource(mock_mode=False)
+        assert resource.mock_mode is False

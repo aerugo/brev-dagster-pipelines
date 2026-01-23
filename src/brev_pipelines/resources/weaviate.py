@@ -31,7 +31,7 @@ class WeaviateResource(ConfigurableResource):
         default="weaviate.weaviate.svc.cluster.local",
         description="Weaviate host",
     )
-    port: int = Field(default=8080, ge=1, le=65535, description="Weaviate HTTP port")
+    port: int = Field(default=80, ge=1, le=65535, description="Weaviate HTTP port")
     grpc_port: int = Field(default=50051, ge=1, le=65535, description="Weaviate gRPC port")
 
     def get_client(self) -> WeaviateClient:

@@ -90,10 +90,10 @@ def test_weaviate_resource_init():
 
     resource = WeaviateResource(
         host="weaviate.weaviate.svc.cluster.local",
-        port=8080,
+        port=80,
     )
     assert resource.host == "weaviate.weaviate.svc.cluster.local"
-    assert resource.port == 8080
+    assert resource.port == 80
 
 
 def test_weaviate_resource_defaults():
@@ -101,7 +101,7 @@ def test_weaviate_resource_defaults():
     from brev_pipelines.resources.weaviate import WeaviateResource
 
     resource = WeaviateResource()
-    assert resource.port == 8080
+    assert resource.port == 80
     assert resource.grpc_port == 50051
 
 

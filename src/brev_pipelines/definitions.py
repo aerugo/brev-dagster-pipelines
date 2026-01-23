@@ -59,7 +59,10 @@ defs = Definitions(
         ),
         "weaviate": WeaviateResource(
             host=os.getenv("WEAVIATE_HOST", "weaviate.weaviate.svc.cluster.local"),
-            port=int(os.getenv("WEAVIATE_PORT", "8080")),
+            port=int(os.getenv("WEAVIATE_PORT", "80")),
+            grpc_host=os.getenv(
+                "WEAVIATE_GRPC_HOST", "weaviate-grpc.weaviate.svc.cluster.local"
+            ),
             grpc_port=int(os.getenv("WEAVIATE_GRPC_PORT", "50051")),
         ),
     },

@@ -102,6 +102,7 @@ def test_weaviate_resource_defaults():
 
     resource = WeaviateResource()
     assert resource.port == 80
+    assert resource.grpc_host == "weaviate-grpc.weaviate.svc.cluster.local"
     assert resource.grpc_port == 50051
 
 
@@ -112,9 +113,11 @@ def test_weaviate_resource_custom_ports():
     resource = WeaviateResource(
         host="localhost",
         port=9080,
+        grpc_host="localhost",
         grpc_port=50052,
     )
     assert resource.port == 9080
+    assert resource.grpc_host == "localhost"
     assert resource.grpc_port == 50052
 
 

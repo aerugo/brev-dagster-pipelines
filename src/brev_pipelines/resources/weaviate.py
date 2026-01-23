@@ -22,16 +22,21 @@ class WeaviateResource(ConfigurableResource):
     """Weaviate vector database resource.
 
     Attributes:
-        host: Weaviate service hostname.
+        host: Weaviate HTTP service hostname.
         port: Weaviate HTTP port.
+        grpc_host: Weaviate gRPC service hostname.
         grpc_port: Weaviate gRPC port for vector operations.
     """
 
     host: str = Field(
         default="weaviate.weaviate.svc.cluster.local",
-        description="Weaviate host",
+        description="Weaviate HTTP host",
     )
     port: int = Field(default=80, ge=1, le=65535, description="Weaviate HTTP port")
+    grpc_host: str = Field(
+        default="weaviate-grpc.weaviate.svc.cluster.local",
+        description="Weaviate gRPC host",
+    )
     grpc_port: int = Field(default=50051, ge=1, le=65535, description="Weaviate gRPC port")
 
     def get_client(self) -> WeaviateClient:
@@ -47,7 +52,7 @@ class WeaviateResource(ConfigurableResource):
             http_host=self.host,
             http_port=self.port,
             http_secure=False,
-            grpc_host=self.host,
+            grpc_host=self.grpc_host,
             grpc_port=self.grpc_port,
             grpc_secure=False,
         )

@@ -93,6 +93,14 @@ def synthetic_speeches(
     # Convert to list of dicts for Safe Synthesizer
     data_for_synthesis = df_for_synthesis.to_dicts()
 
+    # Truncate long texts to fit TinyLlama context window
+    # TinyLlama-1.1B has 2048 tokens base, 12K with RoPE scaling (6x)
+    # ~4 chars per token, so ~8000 chars max for text field
+    MAX_TEXT_LENGTH = 8000
+    for record in data_for_synthesis:
+        if "text" in record and record["text"] and len(record["text"]) > MAX_TEXT_LENGTH:
+            record["text"] = record["text"][:MAX_TEXT_LENGTH] + "..."
+
     context.log.info(f"Generating synthetic data for {len(df)} speeches...")
 
     # Process in batches (Safe Synthesizer has limits)

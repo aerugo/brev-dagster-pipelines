@@ -159,12 +159,12 @@ class TestSafeSynthesizerResource:
         assert resource.namespace == "custom-namespace"
 
     def test_service_endpoint_default(self):
-        """Test default service endpoint."""
+        """Test default service endpoint uses NeMo Core API."""
         from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
 
         resource = SafeSynthesizerResource()
-        assert "nvidia-safe-synth" in resource.service_endpoint
-        assert "8080" in resource.service_endpoint
+        assert "nemo-core-api" in resource.service_endpoint
+        assert "8000" in resource.service_endpoint
 
     def test_custom_service_endpoint(self):
         """Test custom service endpoint."""

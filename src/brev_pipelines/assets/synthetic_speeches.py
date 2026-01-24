@@ -94,18 +94,18 @@ def synthetic_speeches(
     data_for_synthesis = df_for_synthesis.to_dicts()
 
     # Truncate long texts to fit TinyLlama context window
-    # NOTE: rope_scaling_factor only applies to training, not vLLM generation!
-    # vLLM generation uses max_model_len=2048 (TinyLlama base) regardless of RoPE config.
-    # 2048 tokens ≈ 8000 chars total, minus ~500 tokens for non-text fields = ~6000 chars
-    # Using 4000 chars for safety margin to avoid Invalid JSON generation errors.
-    # See docs/reports/safe-synthesizer-best-practices.md for context analysis.
-    MAX_TEXT_LENGTH = 4000
+    # CRITICAL: Safe Synthesizer generation puts MULTIPLE example rows in prompt!
+    # vLLM uses max_model_len=2048 regardless of rope_scaling_factor.
+    # Generation prompt structure: schema + 3-5 example rows + generation target
+    # Each row needs: 7 fields including text = ~400 tokens per row at 1500 chars
+    # 2048 tokens / 5 rows = ~400 tokens/row, minus overhead = ~1500 chars max
+    MAX_TEXT_LENGTH = 1500
     for record in data_for_synthesis:
         if "text" in record and record["text"] and len(record["text"]) > MAX_TEXT_LENGTH:
             record["text"] = record["text"][:MAX_TEXT_LENGTH] + "..."
 
     context.log.info(f"Training on {len(data_for_synthesis)} records (single run, no batching)")
-    context.log.info(f"Text truncated to {MAX_TEXT_LENGTH} chars (fits in vLLM 2048 token context)")
+    context.log.info(f"Text truncated to {MAX_TEXT_LENGTH} chars (fits multiple examples in 2048 token context)")
 
     # Single synthesis call with ALL data (not batched!)
     # Safe Synthesizer trains once, then generates num_records synthetic records

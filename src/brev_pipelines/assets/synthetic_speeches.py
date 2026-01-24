@@ -89,8 +89,8 @@ def enriched_data_for_synthesis(
         path=path,
     )
 
-    # Load as DataFrame
-    df = pl.read_parquet(io.BytesIO(response.read()))
+    # Load as DataFrame (response is bytes directly)
+    df = pl.read_parquet(io.BytesIO(response))
     context.log.info(f"Loaded {len(df)} enriched speeches from LakeFS")
 
     # Verify required columns exist

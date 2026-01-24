@@ -4,17 +4,18 @@ This pipeline demonstrates end-to-end AI data product development:
 1. Ingest dataset from Kaggle
 2. Version data in LakeFS
 3. Generate embeddings via local NIM embedding model
-4. Classify tariff mentions via NIM LLM
-5. Generate speech summaries via GPT-OSS (for synthetic data training)
+4. Multi-dimensional classification via GPT-OSS (monetary, trade, outlook, tariffs)
+5. Generate compact summaries via GPT-OSS (for synthetic data training)
 6. Store enriched data product in LakeFS
 7. Index text and embeddings in Weaviate for vector search
 
 All AI inference uses local NIM endpoints - no external API dependencies.
 
-The summary generation step is critical for the two-stage synthetic data pipeline:
-- Safe Synthesizer has a 2048 token context limit
-- We generate ~2000 token summaries for training
-- Phase 4 expands synthetic summaries back to full speeches
+Data enrichment for synthetic data pipeline:
+- Numeric classifications (1-5 scales): Capture overall sentiment/stance
+- Compact summaries (~1000 chars): Capture specific metrics, regions, sectors,
+  timelines, risks, and policy tools not in numeric classifications
+- Both fit within Safe Synthesizer's context window for faithful reproduction
 
 Trial Run Mode:
     Run with sample_size config to test with limited records:
@@ -39,48 +40,18 @@ from brev_pipelines.resources.weaviate import WeaviateResource
 
 # Collection schema for Weaviate
 SPEECHES_SCHEMA: list[dict[str, str]] = [
-    {"name": "speech_id", "type": "text", "description": "Unique identifier"},
+    {"name": "reference", "type": "text", "description": "Unique identifier from source"},
     {"name": "date", "type": "text", "description": "Speech date (ISO format)"},
     {"name": "central_bank", "type": "text", "description": "Issuing institution"},
     {"name": "speaker", "type": "text", "description": "Speaker name"},
     {"name": "title", "type": "text", "description": "Speech title"},
     {"name": "text", "type": "text", "description": "Full speech text"},
-    {"name": "tariff_mention", "type": "boolean", "description": "Contains tariff discussion"},
+    {"name": "monetary_stance", "type": "int", "description": "1=very_dovish to 5=very_hawkish"},
+    {"name": "trade_stance", "type": "int", "description": "1=very_protectionist to 5=very_globalist"},
+    {"name": "tariff_mention", "type": "boolean", "description": "Contains tariff/protectionist discussion"},
+    {"name": "economic_outlook", "type": "int", "description": "1=very_negative to 5=very_positive"},
     {"name": "is_governor", "type": "boolean", "description": "Speaker is governor/president/chair"},
 ]
-
-
-def classify_is_governor(speaker: str, title: str) -> bool:
-    """Determine if speaker is a central bank governor/president/chair.
-
-    Uses heuristic matching on speaker name and speech title to identify
-    high-ranking officials.
-
-    Args:
-        speaker: Speaker name from the speech.
-        title: Speech title.
-
-    Returns:
-        True if speaker appears to be a governor-level official.
-    """
-    governor_keywords = [
-        "governor",
-        "president",
-        "chair",
-        "chairman",
-        "chairwoman",
-        "chairperson",
-        "director general",
-        "chief executive",
-        "head of",
-    ]
-    speaker_lower = (speaker or "").lower()
-    title_lower = (title or "").lower()
-
-    return any(
-        keyword in speaker_lower or keyword in title_lower
-        for keyword in governor_keywords
-    )
 
 
 @dg.asset(
@@ -195,7 +166,7 @@ def raw_speeches(
 
 
 @dg.asset(
-    description="Cleaned and normalized speeches with unique IDs",
+    description="Cleaned speeches with null values filled",
     group_name="central_bank_speeches",
     metadata={"layer": "cleaned"},
 )
@@ -203,13 +174,10 @@ def cleaned_speeches(
     context: dg.AssetExecutionContext,
     raw_speeches: pl.DataFrame,
 ) -> pl.DataFrame:
-    """Clean and normalize the raw speeches data.
+    """Clean the raw speeches data.
 
     Performs the following transformations:
-    - Add unique speech_id
-    - Normalize column names
-    - Parse dates
-    - Handle missing values
+    - Fill null values for all columns
     - Filter out empty speeches
 
     Args:
@@ -217,94 +185,35 @@ def cleaned_speeches(
         raw_speeches: Raw DataFrame from Kaggle.
 
     Returns:
-        Cleaned and normalized DataFrame.
-
-    Raises:
-        ValueError: If dataset lacks required text column.
+        Cleaned DataFrame with nulls filled.
     """
     df = raw_speeches
 
-    # Map common column variations to standard names
-    column_mapping = {
-        "date": "date",
-        "Date": "date",
-        "speech_date": "date",
-        "central_bank": "central_bank",
-        "institution": "central_bank",
-        "bank": "central_bank",
-        "speaker": "speaker",
-        "speaker_name": "speaker",
-        "title": "title",
-        "speech_title": "title",
-        "text": "text",
-        "content": "text",
-        "speech": "text",
-        "speech_text": "text",
-    }
+    context.log.info(f"Input columns: {df.columns}")
+    context.log.info(f"Input schema: {df.schema}")
 
-    # Rename columns that exist
-    for old_name, new_name in column_mapping.items():
-        if old_name in df.columns and old_name != new_name:
-            df = df.rename({old_name: new_name})
+    # Fill nulls for all columns based on their type
+    fill_expressions = []
+    for col_name in df.columns:
+        dtype = df.schema[col_name]
+        if dtype == pl.Utf8 or dtype == pl.String:
+            fill_expressions.append(pl.col(col_name).fill_null(""))
+        elif dtype in (pl.Int8, pl.Int16, pl.Int32, pl.Int64, pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64):
+            fill_expressions.append(pl.col(col_name).fill_null(0))
+        elif dtype in (pl.Float32, pl.Float64):
+            fill_expressions.append(pl.col(col_name).fill_null(0.0))
+        elif dtype == pl.Boolean:
+            fill_expressions.append(pl.col(col_name).fill_null(False))
+        # For other types (Date, Datetime, etc.), leave as-is
 
-    # Generate unique IDs
-    df = df.with_row_index("_row_idx")
-    df = df.with_columns(
-        (pl.lit("SPEECH-") + pl.col("_row_idx").cast(pl.Utf8).str.zfill(6)).alias("speech_id")
-    )
-    df = df.drop("_row_idx")
-
-    # Ensure required columns exist (with defaults)
-    if "date" not in df.columns:
-        df = df.with_columns(pl.lit(None).alias("date"))
-    if "central_bank" not in df.columns:
-        df = df.with_columns(pl.lit("Unknown").alias("central_bank"))
-    if "speaker" not in df.columns:
-        df = df.with_columns(pl.lit("Unknown").alias("speaker"))
-    if "title" not in df.columns:
-        df = df.with_columns(pl.lit("Untitled").alias("title"))
-    if "text" not in df.columns:
-        msg = "Dataset must have a 'text' or 'content' column"
-        raise ValueError(msg)
-
-    # Fill nulls
-    df = df.with_columns(
-        [
-            pl.col("central_bank").fill_null("Unknown"),
-            pl.col("speaker").fill_null("Unknown"),
-            pl.col("title").fill_null("Untitled"),
-            pl.col("text").fill_null(""),
-        ]
-    )
-
-    # Select and order columns
-    df = df.select(
-        [
-            "speech_id",
-            "date",
-            "central_bank",
-            "speaker",
-            "title",
-            "text",
-        ]
-    )
+    if fill_expressions:
+        df = df.with_columns(fill_expressions)
 
     # Filter out empty speeches (less than 100 chars)
     df = df.filter(pl.col("text").str.len_chars() > 100)
 
-    # Add is_governor classification based on speaker name and title
-    is_governor_values = [
-        classify_is_governor(row["speaker"], row["title"])
-        for row in df.iter_rows(named=True)
-    ]
-    df = df.with_columns(pl.Series("is_governor", is_governor_values))
-
     context.log.info(f"Cleaned {len(df)} speeches")
-    unique_banks = df["central_bank"].unique().to_list()[:10]
-    context.log.info(f"Central banks (sample): {unique_banks}")
-
-    governor_count = df.filter(pl.col("is_governor")).height
-    context.log.info(f"Governor speeches: {governor_count}/{len(df)}")
+    context.log.info(f"Output columns: {df.columns}")
 
     return df
 
@@ -358,38 +267,100 @@ def speech_embeddings(
     return (df, embeddings)
 
 
+# Classification scale mappings
+MONETARY_STANCE_SCALE = {
+    "very_dovish": 1,
+    "somewhat_dovish": 2,
+    "neutral": 3,
+    "somewhat_hawkish": 4,
+    "very_hawkish": 5,
+}
+
+TRADE_STANCE_SCALE = {
+    "very_protectionist": 1,
+    "somewhat_protectionist": 2,
+    "neutral": 3,
+    "somewhat_globalist": 4,
+    "very_globalist": 5,
+}
+
+OUTLOOK_SCALE = {
+    "very_negative": 1,
+    "somewhat_negative": 2,
+    "neutral": 3,
+    "somewhat_positive": 4,
+    "very_positive": 5,
+}
+
+# Few-shot examples based on central bank communication research
+# References:
+# - Lucca & Trebbi (2009) "Measuring Central Bank Communication"
+# - Hansen & McMahon (2016) "Shocking Language"
+# - Apel & Blix Grimaldi (2014) "How Informative Are Central Bank Minutes?"
+CLASSIFICATION_FEW_SHOT_EXAMPLES = """
+Example 1 - Very Hawkish, Neutral Trade, Negative Outlook:
+"Inflation remains unacceptably high at 6.2%, well above our 2% target. The Committee judges that ongoing increases in the policy rate will be appropriate. We are strongly committed to returning inflation to our target, and we will keep at it until the job is done. The labor market remains extremely tight, contributing to upward pressure on wages and prices."
+Classification: {"monetary_stance": "very_hawkish", "trade_stance": "neutral", "tariff_mention": 0, "economic_outlook": "somewhat_negative"}
+
+Example 2 - Very Dovish, Neutral Trade, Negative Outlook:
+"Economic activity has weakened considerably. We have cut our policy rate by 50 basis points and stand ready to act further if needed. The Committee will use its full range of tools to support the economy. Credit conditions have tightened significantly, and we are closely monitoring financial stability risks."
+Classification: {"monetary_stance": "very_dovish", "trade_stance": "neutral", "tariff_mention": 0, "economic_outlook": "very_negative"}
+
+Example 3 - Neutral Monetary, Protectionist, Mentions Tariffs:
+"We are monitoring the impact of recently announced tariffs on imported goods. These trade measures may affect inflation dynamics and supply chains. The central bank remains vigilant about pass-through effects from customs duties on consumer prices. Our monetary policy stance remains appropriate given current conditions."
+Classification: {"monetary_stance": "neutral", "trade_stance": "somewhat_protectionist", "tariff_mention": 1, "economic_outlook": "neutral"}
+
+Example 4 - Somewhat Hawkish, Globalist, Positive Outlook:
+"The economy continues to expand at a solid pace. International trade flows remain robust, supporting our export-oriented sectors. We see benefits from our open trade agreements and cross-border investment. Given the strength of economic activity, we judge that some further gradual increases in the policy rate will be appropriate."
+Classification: {"monetary_stance": "somewhat_hawkish", "trade_stance": "somewhat_globalist", "tariff_mention": 0, "economic_outlook": "somewhat_positive"}
+
+Example 5 - Somewhat Dovish, Very Protectionist, Mentions Tariffs:
+"We have lowered interest rates to support domestic industry facing headwinds from global competition. Import levies and trade barriers are necessary to protect strategic sectors. The government's tariff policy on steel and aluminum imports aligns with our objective of supporting domestic employment."
+Classification: {"monetary_stance": "somewhat_dovish", "trade_stance": "very_protectionist", "tariff_mention": 1, "economic_outlook": "neutral"}
+"""
+
+
 @dg.asset(
-    description="Speeches classified for tariff mentions using NIM LLM",
+    description="Multi-dimensional speech classification using GPT-OSS",
     group_name="central_bank_speeches",
     metadata={
         "layer": "enriched",
         "uses_gpu": "true",
+        "model": "GPT-OSS 120B",
     },
 )
-def tariff_classification(
+def speech_classification(
     context: dg.AssetExecutionContext,
     cleaned_speeches: pl.DataFrame,
     nim: NIMResource,
 ) -> pl.DataFrame:
-    """Classify speeches for tariff mentions using NIM LLM.
+    """Classify speeches on multiple dimensions using GPT-OSS.
 
-    Uses NIM to analyze each speech and determine if it discusses tariffs,
-    trade barriers, customs duties, or related trade policy topics.
+    Performs four classifications per speech in a single LLM call:
+    1. Monetary stance: very_dovish to very_hawkish (1-5 scale)
+    2. Trade stance: very_protectionist to very_globalist (1-5 scale)
+    3. Tariff mention: binary (0/1)
+    4. Economic outlook: very_negative to very_positive (1-5 scale)
+
+    Uses few-shot prompting based on central bank communication research.
 
     Args:
         context: Dagster execution context for logging.
         cleaned_speeches: Cleaned DataFrame with speech text.
-        nim: NIM LLM resource for text classification.
+        nim: NIM LLM resource (GPT-OSS 120B).
 
     Returns:
-        DataFrame with tariff_mention and tariff_confidence columns.
+        DataFrame with classification columns added.
     """
     df = cleaned_speeches
 
+    # Results lists
+    monetary_stances: list[int] = []
+    trade_stances: list[int] = []
     tariff_mentions: list[int] = []
-    tariff_confidences: list[float] = []
+    economic_outlooks: list[int] = []
 
-    # Process in batches to manage GPU memory
+    # Process in batches for progress logging
     batch_size = 10
     total = len(df)
 
@@ -398,59 +369,91 @@ def tariff_classification(
         batch = df.slice(i, batch_end - i)
 
         for row in batch.iter_rows(named=True):
-            # Take first 3000 chars for classification
-            text_excerpt = (row.get("text", "") or "")[:3000]
+            # Take first 4000 chars for classification
+            text_excerpt = (row.get("text", "") or "")[:4000]
             title = row.get("title", "") or "Untitled"
+            speaker = row.get("speaker", "") or "Unknown"
+            central_bank = row.get("central_bank", "") or "Unknown"
 
-            prompt = f"""Analyze this central bank speech excerpt and determine if it discusses tariffs, trade barriers, customs duties, import/export restrictions, or trade policy.
+            prompt = f"""You are an expert analyst of central bank communications. Classify the following speech on multiple dimensions.
+
+{CLASSIFICATION_FEW_SHOT_EXAMPLES}
+
+Now classify this speech:
 
 Title: {title}
+Speaker: {speaker}
+Central Bank: {central_bank}
 
-Excerpt:
+Speech excerpt:
 {text_excerpt}
 
 Respond with ONLY a JSON object in this exact format:
-{{"tariff_mention": 0 or 1, "confidence": 0.0 to 1.0}}
+{{"monetary_stance": "very_dovish|somewhat_dovish|neutral|somewhat_hawkish|very_hawkish", "trade_stance": "very_protectionist|somewhat_protectionist|neutral|somewhat_globalist|very_globalist", "tariff_mention": 0 or 1, "economic_outlook": "very_negative|somewhat_negative|neutral|somewhat_positive|very_positive"}}
 
-Where tariff_mention is 1 if the speech discusses tariffs/trade barriers, 0 otherwise."""
+Classification:"""
 
-            response = nim.generate(prompt, max_tokens=50, temperature=0.1)
+            response = nim.generate(prompt, max_tokens=150, temperature=0.1)
 
             # Parse response
             try:
-                # Try to extract JSON from response
                 json_match = re.search(r"\{[^}]+\}", response)
                 if json_match:
                     result = json.loads(json_match.group())
-                    tariff_mentions.append(int(result.get("tariff_mention", 0)))
-                    tariff_confidences.append(float(result.get("confidence", 0.5)))
+
+                    # Map string values to numeric scales
+                    monetary = MONETARY_STANCE_SCALE.get(
+                        result.get("monetary_stance", "neutral"), 3
+                    )
+                    trade = TRADE_STANCE_SCALE.get(
+                        result.get("trade_stance", "neutral"), 3
+                    )
+                    tariff = int(result.get("tariff_mention", 0))
+                    outlook = OUTLOOK_SCALE.get(
+                        result.get("economic_outlook", "neutral"), 3
+                    )
+
+                    monetary_stances.append(monetary)
+                    trade_stances.append(trade)
+                    tariff_mentions.append(tariff)
+                    economic_outlooks.append(outlook)
                 else:
-                    # Default to 0 if parsing fails
+                    # Default to neutral values if parsing fails
+                    monetary_stances.append(3)
+                    trade_stances.append(3)
                     tariff_mentions.append(0)
-                    tariff_confidences.append(0.0)
+                    economic_outlooks.append(3)
             except Exception as e:
                 context.log.warning(f"Failed to parse LLM response: {e}")
+                monetary_stances.append(3)
+                trade_stances.append(3)
                 tariff_mentions.append(0)
-                tariff_confidences.append(0.0)
+                economic_outlooks.append(3)
 
-        context.log.info(f"Processed {batch_end}/{total} speeches")
+        context.log.info(f"Classified {batch_end}/{total} speeches")
 
     # Add classification columns
     df = df.with_columns(
         [
+            pl.Series("monetary_stance", monetary_stances).cast(pl.Int8),
+            pl.Series("trade_stance", trade_stances).cast(pl.Int8),
             pl.Series("tariff_mention", tariff_mentions).cast(pl.Int8),
-            pl.Series("tariff_confidence", tariff_confidences).cast(pl.Float64),
+            pl.Series("economic_outlook", economic_outlooks).cast(pl.Int8),
         ]
     )
 
+    # Log classification statistics
+    context.log.info(f"Monetary stance distribution: {df['monetary_stance'].value_counts()}")
+    context.log.info(f"Trade stance distribution: {df['trade_stance'].value_counts()}")
     tariff_count = df.filter(pl.col("tariff_mention") == 1).height
-    context.log.info(f"Found {tariff_count}/{len(df)} speeches mentioning tariffs")
+    context.log.info(f"Speeches mentioning tariffs: {tariff_count}/{len(df)}")
+    context.log.info(f"Economic outlook distribution: {df['economic_outlook'].value_counts()}")
 
     return df
 
 
 @dg.asset(
-    description="Speech summaries generated by GPT-OSS for synthetic data training",
+    description="Compact speech summaries for Safe Synthesizer training",
     group_name="central_bank_speeches",
     metadata={
         "layer": "enriched",
@@ -463,17 +466,28 @@ def speech_summaries(
     cleaned_speeches: pl.DataFrame,
     nim: NIMResource,
 ) -> pl.DataFrame:
-    """Generate structured summaries of each speech using GPT-OSS.
+    """Generate compact, structured summaries for Safe Synthesizer training.
 
-    These summaries are used for:
-    1. Training Safe Synthesizer (fits in 2048 token context)
-    2. Expanding back to full speeches after synthesis
+    These summaries are designed to:
+    1. Fit within Safe Synthesizer's context window (~2000 chars target)
+    2. Capture semantic nuance NOT in numeric classifications
+    3. Use bullet-point format for easier TinyLlama reproduction
 
-    Each summary captures:
-    - Main message and key policy points
-    - Tone and sentiment (hawkish/dovish/neutral)
-    - Economic context and global factors
-    - Target length: ~2000 tokens (~8000 chars)
+    What numeric classifications capture:
+    - monetary_stance (1-5): Overall hawkish/dovish direction
+    - trade_stance (1-5): Protectionist vs globalist leaning
+    - economic_outlook (1-5): Positive/negative sentiment
+    - tariff_mention (0/1): Whether tariffs are discussed
+
+    What summaries capture (the nuance):
+    - SPECIFIC METRICS: Exact numbers cited (inflation %, GDP growth, unemployment)
+    - GEOGRAPHIC FOCUS: Which regions/countries mentioned
+    - SECTOR COMMENTARY: Which industries discussed (housing, energy, finance)
+    - FORWARD GUIDANCE: Timeline language (next quarter, 2024, medium-term)
+    - RISK FACTORS: Specific risks mentioned (supply chain, geopolitical, banking)
+    - POLICY TOOLS: Which instruments mentioned (rates, QE, reserves, guidance)
+
+    Target length: 800-1200 chars (fits in Safe Synthesizer with other metadata)
 
     Args:
         context: Dagster execution context for logging.
@@ -481,7 +495,7 @@ def speech_summaries(
         nim: NIM LLM resource for summary generation (GPT-OSS 120B).
 
     Returns:
-        DataFrame with speech_id and summary columns.
+        DataFrame with reference and summary columns.
     """
     df = cleaned_speeches
 
@@ -490,44 +504,48 @@ def speech_summaries(
 
     # Process speeches individually (GPT-OSS 120B is slow but thorough)
     for idx, row in enumerate(df.iter_rows(named=True)):
-        speech_id = row["speech_id"]
+        reference = row["reference"]
         title = row.get("title", "") or "Untitled"
         speaker = row.get("speaker", "") or "Unknown"
         central_bank = row.get("central_bank", "") or "Unknown"
-        date = row.get("date", "") or ""
         text = row.get("text", "") or ""
 
-        # Take first 15000 chars for summarization (GPT-OSS can handle this)
-        text_excerpt = text[:15000]
+        # Take first 10000 chars for summarization
+        text_excerpt = text[:10000]
 
-        prompt = f"""You are analyzing a central bank speech. Generate a comprehensive summary that captures:
+        prompt = f"""Extract key details from this central bank speech into a COMPACT bullet-point summary.
 
-1. MAIN MESSAGE: Core policy stance and key announcements (2-3 sentences)
-2. TONE: Is it hawkish (tight policy), dovish (loose policy), or neutral? Explain why.
-3. ECONOMIC CONTEXT: What economic conditions are discussed? (inflation, growth, employment, etc.)
-4. KEY POLICY POINTS: List 3-5 specific policy details or forward guidance
-5. GLOBAL FACTORS: Any international/global considerations mentioned
-6. IMPLICATIONS: Expected market or economic impact
+IMPORTANT: Keep total output under 1000 characters. Use terse, information-dense bullet points.
 
-Speech Metadata:
-- Title: {title}
-- Speaker: {speaker}
-- Central Bank: {central_bank}
-- Date: {date}
+Focus on SPECIFIC DETAILS not captured by general sentiment scores:
 
-Speech Text:
+• METRICS: Exact numbers (inflation %, GDP growth, unemployment rate, rate changes)
+• REGIONS: Countries/regions specifically discussed
+• SECTORS: Industries mentioned (housing, energy, labor, banking, trade)
+• TIMELINE: Forward guidance timeframes (next meeting, Q2 2024, medium-term)
+• RISKS: Specific concerns (supply chain, geopolitical, financial stability)
+• TOOLS: Policy instruments discussed (rates, QE, reserves, forward guidance)
+
+Speech: {title}
+Speaker: {speaker} ({central_bank})
+
+Text excerpt:
 {text_excerpt}
 
-Generate a detailed summary (approximately 2000 tokens / 8000 characters):"""
+Generate a COMPACT bullet-point summary (under 1000 characters total):"""
 
-        # Generate summary with longer timeout for large model
-        summary = nim.generate(prompt, max_tokens=2500, temperature=0.3)
+        # Generate summary - fewer tokens needed for compact format
+        summary = nim.generate(prompt, max_tokens=400, temperature=0.2)
 
         # Handle potential errors
         if summary.startswith("LLM error:"):
-            context.log.warning(f"Summary generation failed for {speech_id}: {summary}")
-            # Fall back to simple truncation
-            summary = f"[Auto-summary failed] Title: {title}. First 500 chars: {text[:500]}..."
+            context.log.warning(f"Summary generation failed for {reference}: {summary}")
+            # Fall back to simple extraction of key terms
+            summary = f"• Topic: {title[:100]}\n• Speaker: {speaker}\n• Bank: {central_bank}"
+
+        # Truncate if still too long (safety net)
+        if len(summary) > 1500:
+            summary = summary[:1500] + "..."
 
         summaries.append(summary)
 
@@ -535,13 +553,19 @@ Generate a detailed summary (approximately 2000 tokens / 8000 characters):"""
             context.log.info(f"Generated summaries: {idx + 1}/{total}")
 
     # Create result DataFrame
-    result_df = df.select(["speech_id"]).with_columns(
+    result_df = df.select(["reference"]).with_columns(
         pl.Series("summary", summaries)
     )
 
     # Log summary statistics
-    avg_summary_len = sum(len(s) for s in summaries) / len(summaries) if summaries else 0
-    context.log.info(f"Generated {len(summaries)} summaries, avg length: {avg_summary_len:.0f} chars")
+    summary_lengths = [len(s) for s in summaries]
+    avg_len = sum(summary_lengths) / len(summary_lengths) if summary_lengths else 0
+    max_len = max(summary_lengths) if summary_lengths else 0
+    min_len = min(summary_lengths) if summary_lengths else 0
+    context.log.info(
+        f"Generated {len(summaries)} compact summaries: "
+        f"avg={avg_len:.0f} chars, min={min_len}, max={max_len}"
+    )
 
     return result_df
 
@@ -555,41 +579,41 @@ def enriched_speeches(
     context: dg.AssetExecutionContext,
     speech_embeddings: tuple[pl.DataFrame, list[list[float]]],
     speech_summaries: pl.DataFrame,
-    tariff_classification: pl.DataFrame,
+    speech_classification: pl.DataFrame,
 ) -> pl.DataFrame:
     """Combine embeddings, summaries, and classification into final data product.
 
     This is the main data product that combines all enrichment:
     - Original speech text and metadata
     - GPT-OSS generated summaries (for synthetic training)
-    - Tariff classification
-    - is_governor classification
+    - Multi-dimensional classification (monetary, trade, tariff, outlook)
+    - is_governor from source data
 
     Args:
         context: Dagster execution context for logging.
         speech_embeddings: Tuple of (DataFrame, embeddings) from embedding step.
         speech_summaries: DataFrame with GPT-OSS generated summaries.
-        tariff_classification: DataFrame with tariff classification results.
+        speech_classification: DataFrame with multi-dimensional classifications.
 
     Returns:
         Combined DataFrame with all enrichment columns including summaries.
     """
     df_with_embeddings, _ = speech_embeddings
-    df_with_classification = tariff_classification
+    df_with_classification = speech_classification
 
-    # Join classification results
+    # Join classification results (monetary_stance, trade_stance, tariff_mention, economic_outlook)
     df = df_with_embeddings.join(
         df_with_classification.select(
-            ["speech_id", "tariff_mention", "tariff_confidence"]
+            ["reference", "monetary_stance", "trade_stance", "tariff_mention", "economic_outlook"]
         ),
-        on="speech_id",
+        on="reference",
         how="left",
     )
 
     # Join summaries
     df = df.join(
-        speech_summaries.select(["speech_id", "summary"]),
-        on="speech_id",
+        speech_summaries.select(["reference", "summary"]),
+        on="reference",
         how="left",
     )
 
@@ -604,6 +628,15 @@ def enriched_speeches(
     # Log summary coverage
     summary_count = df.filter(pl.col("summary").is_not_null()).height
     context.log.info(f"Speeches with summaries: {summary_count}/{len(df)}")
+
+    # Log classification statistics
+    context.log.info(f"Monetary stance distribution: {df['monetary_stance'].value_counts().sort('monetary_stance')}")
+    context.log.info(f"Trade stance distribution: {df['trade_stance'].value_counts().sort('trade_stance')}")
+    context.log.info(f"Economic outlook distribution: {df['economic_outlook'].value_counts().sort('economic_outlook')}")
+    tariff_count = df.filter(pl.col("tariff_mention") == 1).height
+    context.log.info(f"Speeches mentioning tariffs: {tariff_count}/{len(df)}")
+    governor_count = df.filter(pl.col("is_governor") == 1).height
+    context.log.info(f"Governor speeches: {governor_count}/{len(df)}")
 
     return df
 
@@ -705,7 +738,7 @@ def weaviate_index(
     context: dg.AssetExecutionContext,
     config: PipelineConfig,
     speech_embeddings: tuple[pl.DataFrame, list[list[float]]],
-    tariff_classification: pl.DataFrame,
+    speech_classification: pl.DataFrame,
     weaviate: WeaviateResource,
 ) -> dict[str, Any]:
     """Index speeches in Weaviate for vector search.
@@ -718,7 +751,7 @@ def weaviate_index(
         context: Dagster execution context for logging.
         config: Pipeline configuration (is_trial for collection selection).
         speech_embeddings: Tuple of (DataFrame, embeddings) from embedding step.
-        tariff_classification: DataFrame with tariff classification results.
+        speech_classification: DataFrame with multi-dimensional classifications.
         weaviate: Weaviate resource for vector storage.
 
     Returns:
@@ -726,10 +759,12 @@ def weaviate_index(
     """
     df, embeddings = speech_embeddings
 
-    # Join classification to include tariff_mention
+    # Join classifications
     df = df.join(
-        tariff_classification.select(["speech_id", "tariff_mention"]),
-        on="speech_id",
+        speech_classification.select(
+            ["reference", "monetary_stance", "trade_stance", "tariff_mention", "economic_outlook"]
+        ),
+        on="reference",
         how="left",
     )
 
@@ -752,13 +787,17 @@ def weaviate_index(
     for row in df.iter_rows(named=True):
         objects.append(
             {
-                "speech_id": row["speech_id"],
+                "reference": row["reference"],
                 "date": str(row.get("date", "")),
                 "central_bank": row.get("central_bank", "Unknown"),
                 "speaker": row.get("speaker", "Unknown"),
                 "title": row.get("title", "Untitled"),
                 "text": (row.get("text", "") or "")[:10000],  # Truncate for Weaviate
+                "monetary_stance": int(row.get("monetary_stance", 3)),
+                "trade_stance": int(row.get("trade_stance", 3)),
                 "tariff_mention": bool(row.get("tariff_mention", 0)),
+                "economic_outlook": int(row.get("economic_outlook", 3)),
+                "is_governor": bool(row.get("is_governor", 0)),
             }
         )
 
@@ -783,7 +822,7 @@ central_bank_speeches_assets = [
     raw_speeches,
     cleaned_speeches,
     speech_embeddings,
-    tariff_classification,
+    speech_classification,
     speech_summaries,
     enriched_speeches,
     speeches_data_product,

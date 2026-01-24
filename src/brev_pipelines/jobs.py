@@ -2,16 +2,16 @@
 
 Provides pre-configured jobs for common pipeline operations:
 
-Phase 3 (ETL + Summarization):
+ETL Pipeline (speeches):
 - speeches_full_run: Process all records with GPT-OSS summaries
 - speeches_trial_run: Process only 10 records for testing
 
-Phase 4 (Two-Stage Synthesis - DECOUPLED):
-- synthetic_full_run: Generate synthetic data (loads from LakeFS, independent of Phase 3)
+Synthesis Pipeline (decoupled, loads from LakeFS):
+- synthetic_full_run: Generate synthetic data from enriched speeches
 - synthetic_trial_run: Synthesis trial run with 10 records
 
 Combined Pipelines:
-- full_pipeline_full_run: Complete pipeline (real + synthetic) all records
+- full_pipeline_full_run: Complete pipeline (ETL + synthesis) all records
 - full_pipeline_trial_run: Complete pipeline with 10 records
 """
 
@@ -25,13 +25,13 @@ SYNTHETIC_ASSETS = AssetSelection.groups("synthetic_speeches")
 ALL_SPEECHES_ASSETS = SPEECHES_ASSETS | SYNTHETIC_ASSETS
 
 # =============================================================================
-# Phase 3: ETL + Summarization Jobs
+# ETL Pipeline Jobs
 # =============================================================================
 
 speeches_full_run = define_asset_job(
     name="speeches_full_run",
     description=(
-        "Phase 3: ETL pipeline with GPT-OSS summaries. "
+        "ETL pipeline with GPT-OSS summaries. "
         "Processes all speeches, generates summaries, and stores in LakeFS."
     ),
     selection=SPEECHES_ASSETS,
@@ -40,7 +40,7 @@ speeches_full_run = define_asset_job(
 speeches_trial_run = define_asset_job(
     name="speeches_trial_run",
     description=(
-        "Phase 3 Trial: Process only 10 speeches for testing. "
+        "ETL trial: Process only 10 speeches for testing. "
         "Uses separate collections/paths to avoid affecting production data."
     ),
     selection=SPEECHES_ASSETS,
@@ -54,15 +54,15 @@ speeches_trial_run = define_asset_job(
 )
 
 # =============================================================================
-# Phase 4: Two-Stage Synthesis Jobs (DECOUPLED - loads from LakeFS)
+# Synthesis Pipeline Jobs (decoupled - loads from LakeFS)
 # =============================================================================
 
 synthetic_full_run = define_asset_job(
     name="synthetic_full_run",
     description=(
-        "Phase 4: Two-stage synthesis pipeline. "
-        "Loads enriched data from LakeFS (decoupled from Phase 3), "
-        "trains Safe Synthesizer on summaries, expands with GPT-OSS 120B."
+        "Synthesis pipeline using Safe Synthesizer. "
+        "Loads enriched data from LakeFS (decoupled from ETL pipeline), "
+        "trains on summaries and classifications."
     ),
     selection=SYNTHETIC_ASSETS,
 )
@@ -70,7 +70,7 @@ synthetic_full_run = define_asset_job(
 synthetic_trial_run = define_asset_job(
     name="synthetic_trial_run",
     description=(
-        "Phase 4 Trial: Synthesis with limited records for testing. "
+        "Synthesis trial: Generate synthetic data with limited records for testing. "
         "Loads from trial LakeFS path, uses separate Weaviate collections."
     ),
     selection=SYNTHETIC_ASSETS,
@@ -84,13 +84,13 @@ synthetic_trial_run = define_asset_job(
 )
 
 # =============================================================================
-# Combined Pipeline Jobs (Phase 3 + Phase 4)
+# Combined Pipeline Jobs (ETL + Synthesis)
 # =============================================================================
 
 full_pipeline_full_run = define_asset_job(
     name="full_pipeline_full_run",
     description=(
-        "Complete pipeline: Phase 3 (ETL + summaries) + Phase 4 (synthesis + expansion). "
+        "Complete pipeline: ETL + summaries followed by synthesis. "
         "Processes all speeches and generates synthetic dataset."
     ),
     selection=ALL_SPEECHES_ASSETS,
@@ -99,17 +99,17 @@ full_pipeline_full_run = define_asset_job(
 full_pipeline_trial_run = define_asset_job(
     name="full_pipeline_trial_run",
     description=(
-        "Complete pipeline trial: All phases with 10 records. "
+        "Complete pipeline trial: ETL + synthesis with 10 records. "
         "Uses separate collections/paths for testing."
     ),
     selection=ALL_SPEECHES_ASSETS,
     config={
         "ops": {
-            # Phase 3 trial config
+            # ETL pipeline trial config
             "raw_speeches": {"config": TRIAL_RUN_CONFIG},
             "speeches_data_product": {"config": TRIAL_RUN_CONFIG},
             "weaviate_index": {"config": TRIAL_RUN_CONFIG},
-            # Phase 4 trial config
+            # Synthesis pipeline trial config
             "enriched_data_for_synthesis": {"config": TRIAL_RUN_CONFIG},
             "synthetic_data_product": {"config": TRIAL_RUN_CONFIG},
             "synthetic_weaviate_index": {"config": TRIAL_RUN_CONFIG},
@@ -119,10 +119,10 @@ full_pipeline_trial_run = define_asset_job(
 
 # Export all jobs
 all_jobs = [
-    # Phase 3
+    # ETL pipeline
     speeches_full_run,
     speeches_trial_run,
-    # Phase 4
+    # Synthesis pipeline
     synthetic_full_run,
     synthetic_trial_run,
     # Combined

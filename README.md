@@ -14,8 +14,8 @@ src/brev_pipelines/
 ├── config.py               # Pipeline configuration (sample_size for trial runs)
 ├── jobs.py                 # Pre-configured jobs (trial runs, full runs)
 ├── assets/
-│   ├── central_bank_speeches.py   # Main AI data pipeline (Phases 1-3)
-│   ├── synthetic_speeches.py      # Synthetic data pipeline (Phase 4)
+│   ├── central_bank_speeches.py   # Main AI data pipeline (ETL + enrichment)
+│   ├── synthetic_speeches.py      # Synthetic data pipeline
 │   ├── demo.py                    # Demo pipeline assets
 │   ├── health.py                  # Platform health checks
 │   └── validation.py              # Validation utilities

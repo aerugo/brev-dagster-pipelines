@@ -717,12 +717,26 @@ size {file_size}
                 if summary_response.status_code == 200:
                     summary = summary_response.json()
 
+                # Get HTML evaluation report (contains SQS/DPS graphs and metrics)
+                html_report_bytes: bytes | None = None
+                try:
+                    report_response = requests.get(
+                        f"{self.service_endpoint}/v1beta1/safe-synthesizer/jobs/{job_id}/results/report/download",
+                        timeout=60,
+                    )
+                    if report_response.status_code == 200:
+                        html_report_bytes = report_response.content
+                except Exception:
+                    # HTML report is optional - don't fail if unavailable
+                    pass
+
                 evaluation = {
                     "job_id": job_id,
                     "mia_score": summary.get("membership_inference_protection_score"),
                     "aia_score": summary.get("attribute_inference_protection_score"),
                     "privacy_passed": summary.get("data_privacy_score", 0) > 0.7,
                     "quality_score": summary.get("synthetic_data_quality_score"),
+                    "html_report_bytes": html_report_bytes,
                 }
 
                 return synthetic_data, evaluation

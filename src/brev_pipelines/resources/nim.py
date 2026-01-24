@@ -13,7 +13,7 @@ class NIMResource(ConfigurableResource):
     """
 
     endpoint: str = Field(description="NIM endpoint URL")
-    model: str = Field(default="meta/llama3-8b-instruct", description="Model name")
+    model: str = Field(default="meta/llama-3.1-8b-instruct", description="Model name")
     timeout: int = Field(default=180, description="Request timeout in seconds (increase for large models)")
 
     def generate(
@@ -36,17 +36,17 @@ class NIMResource(ConfigurableResource):
         """
         try:
             response = requests.post(
-                f"{self.endpoint}/v1/completions",
+                f"{self.endpoint}/v1/chat/completions",
                 json={
                     "model": self.model,
-                    "prompt": prompt,
+                    "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": max_tokens,
                     "temperature": temperature,
                 },
                 timeout=timeout_override or self.timeout,
             )
             response.raise_for_status()
-            return response.json()["choices"][0]["text"].strip()
+            return response.json()["choices"][0]["message"]["content"].strip()
         except requests.exceptions.Timeout:
             return f"LLM error: Request timed out after {timeout_override or self.timeout}s"
         except Exception as e:

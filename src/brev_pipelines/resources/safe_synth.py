@@ -513,31 +513,35 @@ class SafeSynthesizerResource(ConfigurableResource):
         batch_response.raise_for_status()
         batch_result = batch_response.json()
 
-        # Step 2: Upload file via LFS
-        upload_info = batch_result["objects"][0]["actions"]["upload"]
-        upload_headers = {"Content-Type": "application/octet-stream"}
-        upload_headers.update(upload_info.get("header", {}))
+        # Step 2: Upload file via LFS (if upload action is provided)
+        obj_result = batch_result["objects"][0]
+        actions = obj_result.get("actions", {})
 
-        upload_response = requests.put(
-            upload_info["href"],
-            data=parquet_bytes,
-            headers=upload_headers,
-            timeout=120,
-        )
-        upload_response.raise_for_status()
+        if "upload" in actions:
+            upload_info = actions["upload"]
+            upload_headers = {"Content-Type": "application/octet-stream"}
+            upload_headers.update(upload_info.get("header", {}))
 
-        # Step 3: Verify upload if endpoint provided
-        verify_info = batch_result["objects"][0]["actions"].get("verify")
-        if verify_info:
-            verify_payload = {"oid": file_hash, "size": file_size}
-            verify_headers = {"Content-Type": "application/vnd.git-lfs+json"}
-            verify_headers.update(verify_info.get("header", {}))
-            requests.post(
-                verify_info["href"],
-                json=verify_payload,
-                headers=verify_headers,
-                timeout=30,
+            upload_response = requests.put(
+                upload_info["href"],
+                data=parquet_bytes,
+                headers=upload_headers,
+                timeout=120,
             )
+            upload_response.raise_for_status()
+
+            # Step 3: Verify upload if endpoint provided
+            verify_info = actions.get("verify")
+            if verify_info:
+                verify_payload = {"oid": file_hash, "size": file_size}
+                verify_headers = {"Content-Type": "application/vnd.git-lfs+json"}
+                verify_headers.update(verify_info.get("header", {}))
+                requests.post(
+                    verify_info["href"],
+                    json=verify_payload,
+                    headers=verify_headers,
+                    timeout=30,
+                )
 
         # Step 4: Create Git commit with LFS pointer
         lfs_pointer = f"""version https://git-lfs.github.com/spec/v1

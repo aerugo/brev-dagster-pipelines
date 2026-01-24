@@ -634,7 +634,8 @@ size {file_size}
                 # RoPE scaling extends context from 2K to ~12K tokens (factor 6 = max)
                 # Allows longer text fields (~10K chars) at cost of increased runtime
                 "rope_scaling_factor": 6,
-                "num_input_records_to_sample": "auto",
+                # Use more training samples to prevent underfitting
+                "num_input_records_to_sample": min(len(data), 5000),
                 # Memory optimization: leave 40% VRAM for evaluation
                 "max_vram_fraction": 0.6,
                 "batch_size": 1,
@@ -643,6 +644,9 @@ size {file_size}
             "generation": {
                 "num_records": len(data),
                 "temperature": config.get("temperature", 0.9) if config else 0.9,
+                # Increase patience to allow more retry attempts
+                "patience": 5,
+                "invalid_fraction_threshold": 0.9,
             },
         }
 

@@ -94,41 +94,35 @@ def synthetic_speeches(
     data_for_synthesis = df_for_synthesis.to_dicts()
 
     # Truncate long texts to fit TinyLlama context window
-    # TinyLlama-1.1B has 2048 tokens base, 12K with RoPE scaling (6x)
-    # ~4 chars per token, so ~8000 chars max for text field
-    MAX_TEXT_LENGTH = 8000
+    # TinyLlama-1.1B has 2048 tokens base (RoPE scaling not applied by Safe Synth)
+    # ~4 chars per token, so ~2000 chars max for text field to leave room for other fields
+    # Each record has: speech_id, date, central_bank, speaker, title, text, tariff_mention
+    # Estimate ~200 tokens for non-text fields, leaving ~1800 tokens (~7200 chars) for text
+    # Using 2000 chars to be safe and leave headroom for generation prompts
+    MAX_TEXT_LENGTH = 2000
     for record in data_for_synthesis:
         if "text" in record and record["text"] and len(record["text"]) > MAX_TEXT_LENGTH:
             record["text"] = record["text"][:MAX_TEXT_LENGTH] + "..."
 
-    context.log.info(f"Generating synthetic data for {len(df)} speeches...")
+    context.log.info(f"Training on {len(data_for_synthesis)} records (single run, no batching)")
+    context.log.info(f"Text truncated to {MAX_TEXT_LENGTH} chars to fit 2048 token context")
 
-    # Process in batches (Safe Synthesizer has limits)
-    batch_size = 1000
-    all_synthetic: list[dict[str, Any]] = []
-    all_evaluations: list[dict[str, Any]] = []
-
-    for i in range(0, len(data_for_synthesis), batch_size):
-        batch = data_for_synthesis[i : i + batch_size]
-        batch_num = i // batch_size + 1
-        context.log.info(f"Processing batch {batch_num}, records {i} to {i + len(batch)}")
-
-        synthetic_batch, evaluation = safe_synth.synthesize(
-            input_data=batch,
-            run_id=f"{run_id}-batch{batch_num}",
-            config={
-                "epsilon": 1.0,
-                "piiReplacement": True,
-                "runMiaEvaluation": True,
-                "runAiaEvaluation": True,
-            },
-        )
-
-        all_synthetic.extend(synthetic_batch)
-        all_evaluations.append(evaluation)
+    # Single synthesis call with ALL data (not batched!)
+    # Safe Synthesizer trains once, then generates num_records synthetic records
+    # See docs/reports/safe-synthesizer-best-practices.md for rationale
+    synthetic_data, evaluation = safe_synth.synthesize(
+        input_data=data_for_synthesis,
+        run_id=run_id,
+        config={
+            "epsilon": 6.0,  # Recommended 4-12 for large datasets (>1000 records)
+            "piiReplacement": True,
+            "runMiaEvaluation": True,
+            "runAiaEvaluation": True,
+        },
+    )
 
     # Convert to DataFrame
-    synthetic_df = pl.DataFrame(all_synthetic)
+    synthetic_df = pl.DataFrame(synthetic_data)
 
     # Add synthetic marker and regenerate IDs using correct Polars pattern
     synthetic_df = synthetic_df.with_row_index("_row_idx")
@@ -142,22 +136,21 @@ def synthetic_speeches(
     )
     synthetic_df = synthetic_df.drop("_row_idx")
 
-    # Aggregate evaluation results
-    mia_scores = [e.get("mia_score") or 0 for e in all_evaluations]
-    aia_scores = [e.get("aia_score") or 0 for e in all_evaluations]
-
+    # Single evaluation result (no aggregation needed)
     combined_evaluation = {
         "total_records": len(synthetic_df),
-        "batches_processed": len(all_evaluations),
-        "avg_mia_score": sum(mia_scores) / len(all_evaluations) if all_evaluations else 0,
-        "avg_aia_score": sum(aia_scores) / len(all_evaluations) if all_evaluations else 0,
-        "all_privacy_passed": all(e.get("privacy_passed", False) for e in all_evaluations),
+        "mia_score": evaluation.get("mia_score") or 0,
+        "aia_score": evaluation.get("aia_score") or 0,
+        "quality_score": evaluation.get("quality_score") or 0,
+        "privacy_passed": evaluation.get("privacy_passed", False),
+        "job_id": evaluation.get("job_id", ""),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "gpu_orchestration": "KAI priority-based preemption",
     }
 
     context.log.info(f"Generated {len(synthetic_df)} synthetic speeches")
-    context.log.info(f"Privacy passed: {combined_evaluation['all_privacy_passed']}")
+    context.log.info(f"Privacy passed: {combined_evaluation['privacy_passed']}")
+    context.log.info(f"MIA score: {combined_evaluation['mia_score']}, AIA score: {combined_evaluation['aia_score']}")
     context.log.info("KAI Scheduler will restore NIM automatically")
 
     return (synthetic_df, combined_evaluation)
@@ -222,9 +215,9 @@ def synthetic_validation_report(
                 message="Add synthetic data validation report",
                 metadata={
                     "dagster_run_id": context.run_id or "",
-                    "mia_score": str(report.get("avg_mia_score", "")),
-                    "aia_score": str(report.get("avg_aia_score", "")),
-                    "privacy_passed": str(report.get("all_privacy_passed", "")),
+                    "mia_score": str(report.get("mia_score", "")),
+                    "aia_score": str(report.get("aia_score", "")),
+                    "privacy_passed": str(report.get("privacy_passed", "")),
                 },
             ),
         )

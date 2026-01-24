@@ -93,19 +93,19 @@ def synthetic_speeches(
     # Convert to list of dicts for Safe Synthesizer
     data_for_synthesis = df_for_synthesis.to_dicts()
 
-    # Truncate long texts to fit TinyLlama context window
-    # TinyLlama-1.1B has 2048 tokens base (RoPE scaling not applied by Safe Synth)
-    # ~4 chars per token, so ~2000 chars max for text field to leave room for other fields
+    # Truncate long texts to fit TinyLlama context window with RoPE scaling
+    # TinyLlama-1.1B base: 2048 tokens, with rope_scaling_factor=6: ~12,288 tokens
+    # ~4 chars per token = ~49K chars theoretical max, but we use 10K for safety
     # Each record has: speech_id, date, central_bank, speaker, title, text, tariff_mention
-    # Estimate ~200 tokens for non-text fields, leaving ~1800 tokens (~7200 chars) for text
-    # Using 2000 chars to be safe and leave headroom for generation prompts
-    MAX_TEXT_LENGTH = 2000
+    # Estimate ~500 tokens for non-text fields + generation overhead
+    # See docs/reports/safe-synthesizer-best-practices.md for RoPE scaling details
+    MAX_TEXT_LENGTH = 10000
     for record in data_for_synthesis:
         if "text" in record and record["text"] and len(record["text"]) > MAX_TEXT_LENGTH:
             record["text"] = record["text"][:MAX_TEXT_LENGTH] + "..."
 
     context.log.info(f"Training on {len(data_for_synthesis)} records (single run, no batching)")
-    context.log.info(f"Text truncated to {MAX_TEXT_LENGTH} chars to fit 2048 token context")
+    context.log.info(f"Text truncated to {MAX_TEXT_LENGTH} chars (RoPE scaling factor 6 = ~12K token context)")
 
     # Single synthesis call with ALL data (not batched!)
     # Safe Synthesizer trains once, then generates num_records synthetic records

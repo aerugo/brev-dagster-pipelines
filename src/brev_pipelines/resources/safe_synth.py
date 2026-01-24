@@ -627,6 +627,9 @@ size {file_size}
             },
             "training": {
                 "pretrained_model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+                # RoPE scaling extends context from 2K to ~12K tokens (factor 6 = max)
+                # Allows longer text fields (~10K chars) at cost of increased runtime
+                "rope_scaling_factor": 6,
                 "num_input_records_to_sample": "auto",
                 # Memory optimization: leave 40% VRAM for evaluation
                 "max_vram_fraction": 0.6,

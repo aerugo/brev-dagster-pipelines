@@ -643,10 +643,14 @@ size {file_size}
             },
             "generation": {
                 "num_records": len(data),
-                "temperature": config.get("temperature", 0.9) if config else 0.9,
+                # Lower temperature for more deterministic (valid JSON) output
+                "temperature": config.get("temperature", 0.5) if config else 0.5,
                 # Increase patience to allow more retry attempts
                 "patience": 5,
                 "invalid_fraction_threshold": 0.9,
+                # Enable structured generation to force valid JSON output
+                "use_structured_generation": True,
+                "structured_generation_backend": "auto",
             },
         }
 

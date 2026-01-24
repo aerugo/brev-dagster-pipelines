@@ -332,7 +332,7 @@ Classification: {"monetary_stance": "somewhat_dovish", "trade_stance": "very_pro
 def speech_classification(
     context: dg.AssetExecutionContext,
     cleaned_speeches: pl.DataFrame,
-    nim: NIMResource,
+    nim_reasoning: NIMResource,
 ) -> pl.DataFrame:
     """Classify speeches on multiple dimensions using GPT-OSS.
 
@@ -347,7 +347,7 @@ def speech_classification(
     Args:
         context: Dagster execution context for logging.
         cleaned_speeches: Cleaned DataFrame with speech text.
-        nim: NIM LLM resource (GPT-OSS 120B).
+        nim_reasoning: NIM reasoning resource (GPT-OSS 120B).
 
     Returns:
         DataFrame with classification columns added.
@@ -393,7 +393,7 @@ Respond with ONLY a JSON object in this exact format:
 
 Classification:"""
 
-            response = nim.generate(prompt, max_tokens=150, temperature=0.1)
+            response = nim_reasoning.generate(prompt, max_tokens=150, temperature=0.1)
 
             # Parse response
             try:
@@ -464,7 +464,7 @@ Classification:"""
 def speech_summaries(
     context: dg.AssetExecutionContext,
     cleaned_speeches: pl.DataFrame,
-    nim: NIMResource,
+    nim_reasoning: NIMResource,
 ) -> pl.DataFrame:
     """Generate compact, structured summaries for Safe Synthesizer training.
 
@@ -492,7 +492,7 @@ def speech_summaries(
     Args:
         context: Dagster execution context for logging.
         cleaned_speeches: Cleaned DataFrame with speech text.
-        nim: NIM LLM resource for summary generation (GPT-OSS 120B).
+        nim_reasoning: NIM reasoning resource for summary generation (GPT-OSS 120B).
 
     Returns:
         DataFrame with reference and summary columns.
@@ -535,7 +535,7 @@ Text excerpt:
 Generate a COMPACT bullet-point summary (under 1000 characters total):"""
 
         # Generate summary - fewer tokens needed for compact format
-        summary = nim.generate(prompt, max_tokens=400, temperature=0.2)
+        summary = nim_reasoning.generate(prompt, max_tokens=400, temperature=0.2)
 
         # Handle potential errors
         if summary.startswith("LLM error:"):

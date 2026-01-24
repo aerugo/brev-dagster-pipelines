@@ -40,8 +40,15 @@ defs = Definitions(
         ),
         "nim": NIMResource(
             endpoint=os.getenv(
-                "NIM_ENDPOINT", "http://nvidia-nim-llm.nvidia-nim.svc.cluster.local:8000"
+                "NIM_ENDPOINT", "http://nim-llm.nvidia-ai.svc.cluster.local:8000"
             ),
+        ),
+        "nim_reasoning": NIMResource(
+            endpoint=os.getenv(
+                "NIM_REASONING_ENDPOINT", "http://nim-reasoning.nvidia-ai.svc.cluster.local:8000"
+            ),
+            model="openai/gpt-oss-120b",
+            timeout=600,  # Longer timeout for large reasoning model
         ),
         "nim_embedding": NIMEmbeddingResource(
             endpoint=os.getenv(

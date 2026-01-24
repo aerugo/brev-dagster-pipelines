@@ -321,7 +321,7 @@ Classification: {"monetary_stance": "somewhat_dovish", "trade_stance": "very_pro
 
 
 @dg.asset(
-    description="Multi-dimensional speech classification using GPT-OSS",
+    description="Multi-dimensional speech classification using GPT-OSS 120B",
     group_name="central_bank_speeches",
     metadata={
         "layer": "enriched",
@@ -334,7 +334,7 @@ def speech_classification(
     cleaned_speeches: pl.DataFrame,
     nim_reasoning: NIMResource,
 ) -> pl.DataFrame:
-    """Classify speeches on multiple dimensions using GPT-OSS.
+    """Classify speeches on multiple dimensions using GPT-OSS 120B.
 
     Performs four classifications per speech in a single LLM call:
     1. Monetary stance: very_dovish to very_hawkish (1-5 scale)

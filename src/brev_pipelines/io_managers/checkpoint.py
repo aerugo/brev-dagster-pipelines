@@ -24,13 +24,12 @@ Usage:
 from __future__ import annotations
 
 import io
-from typing import TYPE_CHECKING
+from typing import Any
 
 import polars as pl
 from pydantic import BaseModel, Field
 
-if TYPE_CHECKING:
-    from brev_pipelines.resources.minio import MinIOResource
+from brev_pipelines.resources.minio import MinIOResource
 
 
 class LLMCheckpointManager(BaseModel):

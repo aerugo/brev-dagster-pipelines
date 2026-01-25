@@ -33,7 +33,9 @@ import dagster as dg
 import polars as pl
 
 from brev_pipelines.config import PipelineConfig
+from brev_pipelines.io_managers.checkpoint import LLMCheckpointManager
 from brev_pipelines.resources.lakefs import LakeFSResource
+from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.nim_embedding import NIMEmbeddingResource
 from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
 from brev_pipelines.resources.weaviate import WeaviateResource
@@ -422,34 +424,95 @@ def synthetic_embeddings(
     context: dg.AssetExecutionContext,
     synthetic_summaries: tuple[pl.DataFrame, dict[str, Any]],
     nim_embedding: NIMEmbeddingResource,
+    minio: MinIOResource,
 ) -> tuple[pl.DataFrame, list[list[float]]]:
     """Generate embeddings for synthetic summaries.
 
     Uses local NIM embedding model. Embeds the compact summary which captures
     the semantic content of each synthetic record.
 
+    Uses checkpointing to save progress every 32 rows, allowing recovery
+    from failures without reprocessing completed embeddings.
+
     Args:
         context: Dagster execution context for logging.
         synthetic_summaries: Tuple of (synthetic DataFrame, evaluation).
         nim_embedding: NIM embedding resource for vector generation.
+        minio: MinIO resource for checkpoint storage.
 
     Returns:
         Tuple of (DataFrame, list of 1024-dim embedding vectors).
     """
     df, _ = synthetic_summaries
 
-    # Prepare texts for embedding - use title + summary
-    texts: list[str] = []
+    # Create checkpoint manager for embeddings
+    checkpoint_mgr = LLMCheckpointManager(
+        minio=minio,
+        asset_name="synthetic_embeddings",
+        run_id=context.run_id,
+        checkpoint_interval=32,  # Match embedding batch size
+    )
+
+    # Load existing checkpoint
+    existing_checkpoint = checkpoint_mgr.load()
+    processed_refs = set()
+    if existing_checkpoint is not None:
+        processed_refs = set(existing_checkpoint["reference"].to_list())
+        context.log.info(f"Loaded checkpoint with {len(processed_refs)} embeddings")
+
+    # Filter to unprocessed rows
+    to_process = df.filter(~pl.col("reference").is_in(list(processed_refs)))
+    context.log.info(f"Processing {len(to_process)} remaining rows (skipping {len(processed_refs)} already done)")
+
+    # Process in batches with checkpointing
+    batch_size = 32
+    rows = to_process.to_dicts()
+
+    for i in range(0, len(rows), batch_size):
+        batch = rows[i : i + batch_size]
+
+        # Prepare texts for this batch
+        texts = []
+        for row in batch:
+            title = row.get("title", "") or ""
+            summary = row.get("summary", "") or ""
+            combined = f"{title}\n\n{summary}"
+            texts.append(combined)
+
+        # Generate embeddings for batch
+        batch_embeddings = nim_embedding.embed_texts(texts, batch_size=batch_size)
+
+        # Save to checkpoint
+        for j, row in enumerate(batch):
+            checkpoint_mgr.save_batch([{
+                "reference": row["reference"],
+                "embedding": batch_embeddings[j],
+            }], force=(j == len(batch) - 1))  # Force save at end of batch
+
+        context.log.info(f"Checkpoint saved: {checkpoint_mgr.processed_count} embeddings complete")
+
+    # Finalize and get all results
+    final_checkpoint = checkpoint_mgr.finalize()
+
+    # Clean up checkpoint on success
+    checkpoint_mgr.cleanup()
+
+    # Build embeddings list in DataFrame order
+    embedding_map = {}
+    for row in final_checkpoint.to_dicts():
+        embedding_map[row["reference"]] = row["embedding"]
+
+    embeddings = []
     for row in df.iter_rows(named=True):
-        title = row.get("title", "") or ""
-        summary = row.get("summary", "") or ""
-        combined = f"{title}\n\n{summary}"
-        texts.append(combined)
-
-    context.log.info(f"Generating embeddings for {len(texts)} synthetic summaries...")
-
-    # Generate embeddings (uses NVIDIA NIM embedding model)
-    embeddings = nim_embedding.embed_texts(texts, batch_size=32)
+        ref = row["reference"]
+        if ref in embedding_map:
+            embeddings.append(embedding_map[ref])
+        else:
+            # This shouldn't happen, but fallback to generating
+            title = row.get("title", "") or ""
+            summary = row.get("summary", "") or ""
+            combined = f"{title}\n\n{summary}"
+            embeddings.append(nim_embedding.embed_text(combined))
 
     context.log.info(f"Generated {len(embeddings)} embeddings, dimension: {len(embeddings[0])}")
 

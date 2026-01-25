@@ -33,7 +33,9 @@ import dagster as dg
 import polars as pl
 
 from brev_pipelines.config import PipelineConfig
+from brev_pipelines.io_managers.checkpoint import LLMCheckpointManager, process_with_checkpoint
 from brev_pipelines.resources.lakefs import LakeFSResource
+from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.nim import NIMResource
 from brev_pipelines.resources.nim_embedding import NIMEmbeddingResource
 from brev_pipelines.resources.weaviate import WeaviateResource
@@ -333,6 +335,7 @@ def speech_classification(
     context: dg.AssetExecutionContext,
     cleaned_speeches: pl.DataFrame,
     nim_reasoning: NIMResource,
+    minio: MinIOResource,
 ) -> pl.DataFrame:
     """Classify speeches on multiple dimensions using GPT-OSS 120B.
 
@@ -342,40 +345,37 @@ def speech_classification(
     3. Tariff mention: binary (0/1)
     4. Economic outlook: very_negative to very_positive (1-5 scale)
 
-    Uses few-shot prompting based on central bank communication research.
+    Uses checkpointing to save progress every 10 rows, allowing recovery
+    from failures without reprocessing completed classifications.
 
     Args:
         context: Dagster execution context for logging.
         cleaned_speeches: Cleaned DataFrame with speech text.
         nim_reasoning: NIM reasoning resource (GPT-OSS 120B).
+        minio: MinIO resource for checkpoint storage.
 
     Returns:
         DataFrame with classification columns added.
     """
     df = cleaned_speeches
 
-    # Results lists
-    monetary_stances: list[int] = []
-    trade_stances: list[int] = []
-    tariff_mentions: list[int] = []
-    economic_outlooks: list[int] = []
+    # Create checkpoint manager
+    checkpoint_mgr = LLMCheckpointManager(
+        minio=minio,
+        asset_name="speech_classification",
+        run_id=context.run_id,
+        checkpoint_interval=10,
+    )
 
-    # Process in batches for progress logging
-    batch_size = 10
-    total = len(df)
+    def classify_speech(row: dict) -> dict:
+        """Classify a single speech and return result dict."""
+        reference = row["reference"]
+        text_excerpt = (row.get("text", "") or "")[:4000]
+        title = row.get("title", "") or "Untitled"
+        speaker = row.get("speaker", "") or "Unknown"
+        central_bank = row.get("central_bank", "") or "Unknown"
 
-    for i in range(0, total, batch_size):
-        batch_end = min(i + batch_size, total)
-        batch = df.slice(i, batch_end - i)
-
-        for row in batch.iter_rows(named=True):
-            # Take first 4000 chars for classification
-            text_excerpt = (row.get("text", "") or "")[:4000]
-            title = row.get("title", "") or "Untitled"
-            speaker = row.get("speaker", "") or "Unknown"
-            central_bank = row.get("central_bank", "") or "Unknown"
-
-            prompt = f"""You are an expert analyst of central bank communications. Classify the following speech on multiple dimensions.
+        prompt = f"""You are an expert analyst of central bank communications. Classify the following speech on multiple dimensions.
 
 {CLASSIFICATION_FEW_SHOT_EXAMPLES}
 
@@ -393,53 +393,54 @@ Respond with ONLY a JSON object in this exact format:
 
 Classification:"""
 
-            response = nim_reasoning.generate(prompt, max_tokens=150, temperature=0.1)
+        response = nim_reasoning.generate(prompt, max_tokens=150, temperature=0.1)
 
-            # Parse response
-            try:
-                json_match = re.search(r"\{[^}]+\}", response)
-                if json_match:
-                    result = json.loads(json_match.group())
+        # Parse response with fallback to neutral values
+        monetary, trade, tariff, outlook = 3, 3, 0, 3
+        try:
+            json_match = re.search(r"\{[^}]+\}", response)
+            if json_match:
+                result = json.loads(json_match.group())
+                monetary = MONETARY_STANCE_SCALE.get(result.get("monetary_stance", "neutral"), 3)
+                trade = TRADE_STANCE_SCALE.get(result.get("trade_stance", "neutral"), 3)
+                tariff = int(result.get("tariff_mention", 0))
+                outlook = OUTLOOK_SCALE.get(result.get("economic_outlook", "neutral"), 3)
+        except Exception:
+            pass  # Keep defaults
 
-                    # Map string values to numeric scales
-                    monetary = MONETARY_STANCE_SCALE.get(
-                        result.get("monetary_stance", "neutral"), 3
-                    )
-                    trade = TRADE_STANCE_SCALE.get(
-                        result.get("trade_stance", "neutral"), 3
-                    )
-                    tariff = int(result.get("tariff_mention", 0))
-                    outlook = OUTLOOK_SCALE.get(
-                        result.get("economic_outlook", "neutral"), 3
-                    )
+        return {
+            "reference": reference,
+            "monetary_stance": monetary,
+            "trade_stance": trade,
+            "tariff_mention": tariff,
+            "economic_outlook": outlook,
+        }
 
-                    monetary_stances.append(monetary)
-                    trade_stances.append(trade)
-                    tariff_mentions.append(tariff)
-                    economic_outlooks.append(outlook)
-                else:
-                    # Default to neutral values if parsing fails
-                    monetary_stances.append(3)
-                    trade_stances.append(3)
-                    tariff_mentions.append(0)
-                    economic_outlooks.append(3)
-            except Exception as e:
-                context.log.warning(f"Failed to parse LLM response: {e}")
-                monetary_stances.append(3)
-                trade_stances.append(3)
-                tariff_mentions.append(0)
-                economic_outlooks.append(3)
+    # Process with checkpointing
+    context.log.info(f"Starting classification of {len(df)} speeches with checkpointing")
+    results_df = process_with_checkpoint(
+        df=df,
+        id_column="reference",
+        process_fn=classify_speech,
+        checkpoint_manager=checkpoint_mgr,
+        batch_size=10,
+        logger=context.log,
+    )
 
-        context.log.info(f"Classified {batch_end}/{total} speeches")
+    # Clean up checkpoint on success
+    checkpoint_mgr.cleanup()
 
-    # Add classification columns
-    df = df.with_columns(
-        [
-            pl.Series("monetary_stance", monetary_stances).cast(pl.Int8),
-            pl.Series("trade_stance", trade_stances).cast(pl.Int8),
-            pl.Series("tariff_mention", tariff_mentions).cast(pl.Int8),
-            pl.Series("economic_outlook", economic_outlooks).cast(pl.Int8),
-        ]
+    # Join results back to original DataFrame
+    df = df.join(
+        results_df.select([
+            "reference",
+            pl.col("monetary_stance").cast(pl.Int8),
+            pl.col("trade_stance").cast(pl.Int8),
+            pl.col("tariff_mention").cast(pl.Int8),
+            pl.col("economic_outlook").cast(pl.Int8),
+        ]),
+        on="reference",
+        how="left",
     )
 
     # Log classification statistics
@@ -465,6 +466,7 @@ def speech_summaries(
     context: dg.AssetExecutionContext,
     cleaned_speeches: pl.DataFrame,
     nim_reasoning: NIMResource,
+    minio: MinIOResource,
 ) -> pl.DataFrame:
     """Generate compact, structured summaries for Safe Synthesizer training.
 
@@ -472,6 +474,9 @@ def speech_summaries(
     1. Fit within Safe Synthesizer's context window (~2000 chars target)
     2. Capture semantic nuance NOT in numeric classifications
     3. Use bullet-point format for easier TinyLlama reproduction
+
+    Uses checkpointing to save progress every 10 rows, allowing recovery
+    from failures without reprocessing completed summaries.
 
     What numeric classifications capture:
     - monetary_stance (1-5): Overall hawkish/dovish direction
@@ -493,24 +498,28 @@ def speech_summaries(
         context: Dagster execution context for logging.
         cleaned_speeches: Cleaned DataFrame with speech text.
         nim_reasoning: NIM reasoning resource for summary generation (GPT-OSS 120B).
+        minio: MinIO resource for checkpoint storage.
 
     Returns:
         DataFrame with reference and summary columns.
     """
     df = cleaned_speeches
 
-    summaries: list[str] = []
-    total = len(df)
+    # Create checkpoint manager
+    checkpoint_mgr = LLMCheckpointManager(
+        minio=minio,
+        asset_name="speech_summaries",
+        run_id=context.run_id,
+        checkpoint_interval=10,
+    )
 
-    # Process speeches individually (GPT-OSS 120B is slow but thorough)
-    for idx, row in enumerate(df.iter_rows(named=True)):
+    def summarize_speech(row: dict) -> dict:
+        """Generate summary for a single speech and return result dict."""
         reference = row["reference"]
         title = row.get("title", "") or "Untitled"
         speaker = row.get("speaker", "") or "Unknown"
         central_bank = row.get("central_bank", "") or "Unknown"
         text = row.get("text", "") or ""
-
-        # Take first 10000 chars for summarization
         text_excerpt = text[:10000]
 
         prompt = f"""Extract key details from this central bank speech into a COMPACT bullet-point summary.
@@ -534,30 +543,34 @@ Text excerpt:
 
 Generate a COMPACT bullet-point summary (under 1000 characters total):"""
 
-        # Generate summary - fewer tokens needed for compact format
         summary = nim_reasoning.generate(prompt, max_tokens=400, temperature=0.2)
 
-        # Handle potential errors
+        # Handle LLM errors with fallback
         if summary.startswith("LLM error:"):
-            context.log.warning(f"Summary generation failed for {reference}: {summary}")
-            # Fall back to simple extraction of key terms
             summary = f"• Topic: {title[:100]}\n• Speaker: {speaker}\n• Bank: {central_bank}"
 
-        # Truncate if still too long (safety net)
+        # Truncate if too long
         if len(summary) > 1500:
             summary = summary[:1500] + "..."
 
-        summaries.append(summary)
+        return {"reference": reference, "summary": summary}
 
-        if (idx + 1) % 10 == 0 or idx == total - 1:
-            context.log.info(f"Generated summaries: {idx + 1}/{total}")
-
-    # Create result DataFrame
-    result_df = df.select(["reference"]).with_columns(
-        pl.Series("summary", summaries)
+    # Process with checkpointing
+    context.log.info(f"Starting summarization of {len(df)} speeches with checkpointing")
+    results_df = process_with_checkpoint(
+        df=df,
+        id_column="reference",
+        process_fn=summarize_speech,
+        checkpoint_manager=checkpoint_mgr,
+        batch_size=10,
+        logger=context.log,
     )
 
+    # Clean up checkpoint on success
+    checkpoint_mgr.cleanup()
+
     # Log summary statistics
+    summaries = results_df["summary"].to_list()
     summary_lengths = [len(s) for s in summaries]
     avg_len = sum(summary_lengths) / len(summary_lengths) if summary_lengths else 0
     max_len = max(summary_lengths) if summary_lengths else 0
@@ -567,7 +580,7 @@ Generate a COMPACT bullet-point summary (under 1000 characters total):"""
         f"avg={avg_len:.0f} chars, min={min_len}, max={max_len}"
     )
 
-    return result_df
+    return results_df
 
 
 @dg.asset(

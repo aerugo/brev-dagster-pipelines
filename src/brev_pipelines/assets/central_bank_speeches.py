@@ -635,7 +635,7 @@ def enriched_speeches(
     context.log.info(f"Economic outlook distribution: {df['economic_outlook'].value_counts().sort('economic_outlook')}")
     tariff_count = df.filter(pl.col("tariff_mention") == 1).height
     context.log.info(f"Speeches mentioning tariffs: {tariff_count}/{len(df)}")
-    governor_count = df.filter(pl.col("is_governor") == 1).height
+    governor_count = df.filter(pl.col("is_gov") == 1).height
     context.log.info(f"Governor speeches: {governor_count}/{len(df)}")
 
     return df

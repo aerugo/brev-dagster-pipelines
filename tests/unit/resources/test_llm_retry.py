@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import time
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -536,68 +535,8 @@ class TestRetryWithBackoff:
         assert call_count == 1  # Should not retry
         assert result.error_type == "unexpected_error"
 
-    def test_logger_receives_warnings(self) -> None:
-        """Logger should receive warning messages on retry."""
-        from brev_pipelines.resources.llm_retry import RetryConfig, retry_with_backoff
-        from brev_pipelines.resources.nim import NIMTimeoutError
-
-        call_count = 0
-
-        def llm_call() -> str:
-            nonlocal call_count
-            call_count += 1
-            if call_count < 2:
-                raise NIMTimeoutError("Request timed out")
-            return '{"ok": true}'
-
-        def validate(response: str) -> dict[str, bool]:
-            return {"ok": True}
-
-        def fallback() -> dict[str, bool]:
-            return {"ok": False}
-
-        mock_logger = MagicMock()
-        config = RetryConfig(max_retries=3, base_delay=0.01, jitter=0.0)
-
-        retry_with_backoff(
-            fn=llm_call,
-            validate_fn=validate,
-            record_id="test_logging",
-            fallback_fn=fallback,
-            config=config,
-            logger=mock_logger,
-        )
-
-        # Logger should have received warning for the retry
-        mock_logger.warning.assert_called()
-
-    def test_logger_receives_error_on_permanent_failure(self) -> None:
-        """Logger should receive error message on permanent failure."""
-        from brev_pipelines.resources.llm_retry import RetryConfig, retry_with_backoff
-        from brev_pipelines.resources.nim import NIMServerError
-
-        def llm_call() -> str:
-            raise NIMServerError(500, "permanent failure")
-
-        def validate(response: str) -> dict[str, str]:
-            return {}
-
-        def fallback() -> dict[str, str]:
-            return {}
-
-        mock_logger = MagicMock()
-        config = RetryConfig(max_retries=2, base_delay=0.01, jitter=0.0)
-
-        retry_with_backoff(
-            fn=llm_call,
-            validate_fn=validate,
-            record_id="test_error_logging",
-            fallback_fn=fallback,
-            config=config,
-            logger=mock_logger,
-        )
-
-        mock_logger.error.assert_called()
+    # Note: Logger tests removed - logging is now handled by LLMProgressTracker
+    # at the batch processing level, not in retry_with_backoff
 
     def test_uses_default_config_when_none_provided(self) -> None:
         """Should use default RetryConfig when none provided."""
@@ -963,7 +902,8 @@ class TestTypeAnnotations:
         sig = inspect.signature(retry_with_backoff)
 
         # Should have annotations for all parameters
-        expected_params = ["fn", "validate_fn", "record_id", "fallback_fn", "config", "logger"]
+        # Note: logger parameter was removed - logging is now handled by LLMProgressTracker
+        expected_params = ["fn", "validate_fn", "record_id", "fallback_fn", "config"]
         for param in expected_params:
             assert param in sig.parameters, f"Missing parameter: {param}"
             assert sig.parameters[param].annotation != inspect.Parameter.empty, (

@@ -52,8 +52,12 @@ class TestNIMResourceExceptionBehavior:
 
     @pytest.fixture
     def nim_resource(self) -> NIMResource:
-        """Create NIM resource for testing."""
-        return NIMResource(endpoint="http://test-nim:8000", model="test-model")
+        """Create NIM resource for testing with mock fallback disabled."""
+        return NIMResource(
+            endpoint="http://test-nim:8000",
+            model="test-model",
+            use_mock_fallback=False,  # Disable to test actual exception behavior
+        )
 
     def test_generate_raises_timeout_error(self, nim_resource: NIMResource) -> None:
         """generate() should raise NIMTimeoutError on timeout."""
@@ -144,8 +148,12 @@ class TestNIMResourceHealthCheck:
 
     @pytest.fixture
     def nim_resource(self) -> NIMResource:
-        """Create NIM resource for testing."""
-        return NIMResource(endpoint="http://test-nim:8000", model="test-model")
+        """Create NIM resource for testing with mock fallback disabled."""
+        return NIMResource(
+            endpoint="http://test-nim:8000",
+            model="test-model",
+            use_mock_fallback=False,  # Disable to test actual exception behavior
+        )
 
     def test_health_check_returns_true_when_healthy(self, nim_resource: NIMResource) -> None:
         """health_check() should return True when NIM is healthy."""

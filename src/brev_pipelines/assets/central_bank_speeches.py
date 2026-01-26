@@ -519,14 +519,13 @@ Classification:"""
                 economic_outlook=3,
             )
 
-        # Execute with retry wrapper
+        # Execute with retry wrapper (no per-call logging - progress tracked at batch level)
         result = retry_with_backoff(
             fn=lambda: nim_reasoning.generate(prompt, max_tokens=150, temperature=0.1),
             validate_fn=validate_classification_response,
             record_id=reference,
             fallback_fn=get_fallback,
             config=retry_config,
-            logger=context.log,
         )
 
         # Get values (either parsed or fallback)
@@ -778,14 +777,13 @@ Generate a COMPACT bullet-point summary (under 1000 characters total):"""
             """Return fallback summary with basic info."""
             return f"• Topic: {title[:100]}\n• Speaker: {speaker}\n• Bank: {central_bank}"
 
-        # Execute with retry wrapper
+        # Execute with retry wrapper (no per-call logging - progress tracked at batch level)
         result = retry_with_backoff(
             fn=lambda: nim_reasoning.generate(prompt, max_tokens=400, temperature=0.2),
             validate_fn=validate_summary_response,
             record_id=reference,
             fallback_fn=get_fallback,
             config=retry_config,
-            logger=context.log,
         )
 
         # Get summary (either parsed or fallback)

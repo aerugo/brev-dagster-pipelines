@@ -6,6 +6,7 @@ from brev_pipelines.resources.lakefs import (
     LakeFSNotFoundError,
     LakeFSResource,
 )
+from brev_pipelines.resources.llm_progress import LLMProgressTracker
 from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.nim import (
     NIMError,
@@ -35,6 +36,8 @@ __all__ = [
     "LakeFSError",
     "LakeFSConnectionError",
     "LakeFSNotFoundError",
+    # LLM utilities
+    "LLMProgressTracker",
     # MinIO
     "MinIOResource",
     # NIM

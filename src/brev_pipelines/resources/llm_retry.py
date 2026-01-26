@@ -60,8 +60,6 @@ from brev_pipelines.types import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from dagster import DagsterLogManager
-
 T = TypeVar("T")
 
 
@@ -234,9 +232,11 @@ def retry_with_backoff(
     record_id: str,
     fallback_fn: Callable[[], T],
     config: RetryConfig | None = None,
-    logger: DagsterLogManager | None = None,
 ) -> LLMCallResult[T]:
     """Execute LLM call with retry logic and validation.
+
+    This is a pure function that returns structured results without logging.
+    Use LLMProgressTracker for aggregated progress logging in batch operations.
 
     Args:
         fn: Function that makes the LLM call and returns raw response.
@@ -244,7 +244,6 @@ def retry_with_backoff(
         record_id: Identifier for the record being processed.
         fallback_fn: Function that returns fallback values if all retries fail.
         config: Retry configuration (defaults to RetryConfig()).
-        logger: Optional Dagster logger for debugging.
 
     Returns:
         LLMCallResult with either parsed data or fallback values.
@@ -276,30 +275,24 @@ def retry_with_backoff(
             )
 
         except NIMServiceUnavailableError as e:
-            # Service unavailable with mock fallback enabled - skip retries
-            # This is expected in local dev mode, use fallback immediately
+            # Service unavailable - skip retries, use fallback immediately
             last_error = e
             last_error_type = "NIMServiceUnavailableError"
-            # Don't log here - we'll handle it after the loop with appropriate level
-            break  # Skip remaining retries
+            break
 
         except NIMTimeoutException as e:
-            # Convert NIM timeout to our LLMTimeoutError
             last_error = LLMTimeoutError(str(e))
             last_error_type = "LLMTimeoutError"
 
         except NIMRateLimitException as e:
-            # Convert NIM rate limit to our LLMRateLimitError
             last_error = LLMRateLimitError(str(e))
             last_error_type = "LLMRateLimitError"
 
         except NIMServerException as e:
-            # Convert NIM server error to our LLMServerError
             last_error = LLMServerError(str(e))
             last_error_type = "LLMServerError"
 
         except NIMError as e:
-            # Other NIM errors are retryable
             last_error = RetryableError(str(e))
             last_error_type = "RetryableError"
 
@@ -313,35 +306,15 @@ def retry_with_backoff(
             last_error_type = "unexpected_error"
             break
 
-        # Retry logic for retryable errors
+        # Wait before retry (no logging - caller handles progress)
         if attempt < config.max_retries - 1:
             delay = calculate_backoff(attempt, config)
-            if logger:
-                logger.warning(
-                    f"LLM call failed for {record_id} "
-                    f"(attempt {attempt + 1}/{config.max_retries}): "
-                    f"{last_error}. Retrying in {delay:.1f}s..."
-                )
             time.sleep(delay)
 
     # All retries exhausted or early exit - use fallback
     duration_ms = int((time.time() - start_time) * 1000)
     fallback_values = fallback_fn()
     actual_attempts = attempt + 1
-
-    # Log appropriately based on error type
-    if logger:
-        if last_error_type == "NIMServiceUnavailableError":
-            # Expected in local dev mode - log at debug level only
-            logger.debug(
-                f"Using mock fallback for {record_id} (NIM service unavailable)"
-            )
-        else:
-            # Actual failure - log as error
-            logger.error(
-                f"LLM call failed permanently for {record_id} "
-                f"after {actual_attempts} attempts: {last_error}"
-            )
 
     return LLMCallResult(
         record_id=record_id,

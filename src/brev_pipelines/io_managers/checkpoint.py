@@ -214,10 +214,12 @@ def process_with_checkpoint(
     checkpoint_manager: LLMCheckpointManager,
     batch_size: int = 10,
     logger: DagsterLogManager | None = None,
+    progress_log_interval: int = 100,
 ) -> pl.DataFrame | None:
     """Process DataFrame rows with checkpointing for LLM operations.
 
     Generic helper that handles checkpoint loading, resumption, and saving.
+    Logs progress at intervals rather than per-item for clean output.
 
     Args:
         df: Input DataFrame to process.
@@ -228,6 +230,7 @@ def process_with_checkpoint(
         checkpoint_manager: Checkpoint manager for persistence.
         batch_size: Number of rows to process before saving checkpoint.
         logger: Optional logger for progress updates.
+        progress_log_interval: Log progress every N items (default 100).
 
     Returns:
         DataFrame with all processing results.
@@ -238,37 +241,47 @@ def process_with_checkpoint(
     if existing is not None:
         processed_ids = set(existing[id_column].to_list())
         if logger:
-            logger.info(f"Loaded checkpoint with {len(processed_ids)} processed rows")
+            logger.info(f"Resuming from checkpoint: {len(processed_ids)} rows already complete")
 
     # Filter to unprocessed rows
     to_process = df.filter(~pl.col(id_column).is_in(list(processed_ids)))
-    if logger:
-        logger.info(
-            f"Processing {len(to_process)} remaining rows (skipping {len(processed_ids)} already done)"
-        )
+    total_remaining = len(to_process)
 
-    if len(to_process) == 0:
+    if total_remaining == 0:
+        if logger:
+            logger.info("All rows already processed, nothing to do")
         return existing
 
-    # Process in batches
-    rows = to_process.to_dicts()
-    batch_results = []
+    if logger:
+        logger.info(f"Processing {total_remaining} rows")
 
-    for _i, row in enumerate(rows):
+    # Process in batches with progress tracking
+    rows = to_process.to_dicts()
+    batch_results: list[dict[str, Any]] = []
+    processed_count = 0
+    last_log_count = 0
+
+    for row in rows:
         result = process_fn(row)
         batch_results.append(result)
+        processed_count += 1
 
         # Save checkpoint at batch boundaries
         if len(batch_results) >= batch_size:
             checkpoint_manager.save_batch(batch_results, force=True)
             batch_results = []
-            if logger:
-                logger.info(f"Checkpoint saved: {checkpoint_manager.processed_count} rows complete")
+
+        # Log progress at intervals
+        if logger and processed_count - last_log_count >= progress_log_interval:
+            pct = (processed_count / total_remaining) * 100
+            logger.info(f"Progress: {processed_count}/{total_remaining} ({pct:.0f}%)")
+            last_log_count = processed_count
 
     # Save any remaining results
     if batch_results:
         checkpoint_manager.save_batch(batch_results, force=True)
-        if logger:
-            logger.info(f"Final checkpoint: {checkpoint_manager.processed_count} rows complete")
+
+    if logger:
+        logger.info(f"Completed: {processed_count}/{total_remaining} rows processed")
 
     return checkpoint_manager.finalize()

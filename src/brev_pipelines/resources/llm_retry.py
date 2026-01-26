@@ -280,10 +280,7 @@ def retry_with_backoff(
             # This is expected in local dev mode, use fallback immediately
             last_error = e
             last_error_type = "NIMServiceUnavailableError"
-            if logger:
-                logger.info(
-                    f"NIM service unavailable for {record_id}, using fallback (mock mode)"
-                )
+            # Don't log here - we'll handle it after the loop with appropriate level
             break  # Skip remaining retries
 
         except NIMTimeoutException as e:
@@ -327,22 +324,31 @@ def retry_with_backoff(
                 )
             time.sleep(delay)
 
-    # All retries exhausted - use fallback
+    # All retries exhausted or early exit - use fallback
     duration_ms = int((time.time() - start_time) * 1000)
     fallback_values = fallback_fn()
+    actual_attempts = attempt + 1
 
+    # Log appropriately based on error type
     if logger:
-        logger.error(
-            f"LLM call failed permanently for {record_id} "
-            f"after {config.max_retries} attempts: {last_error}"
-        )
+        if last_error_type == "NIMServiceUnavailableError":
+            # Expected in local dev mode - log at debug level only
+            logger.debug(
+                f"Using mock fallback for {record_id} (NIM service unavailable)"
+            )
+        else:
+            # Actual failure - log as error
+            logger.error(
+                f"LLM call failed permanently for {record_id} "
+                f"after {actual_attempts} attempts: {last_error}"
+            )
 
     return LLMCallResult(
         record_id=record_id,
         status="failed",
         error_type=last_error_type,
         error_message=str(last_error) if last_error else None,
-        attempts=config.max_retries,
+        attempts=actual_attempts,
         fallback_used=True,
         fallback_values=fallback_values,
         duration_ms=duration_ms,

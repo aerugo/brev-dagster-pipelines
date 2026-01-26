@@ -169,6 +169,15 @@ services:
     ports:
       - "8080:8080"   # HTTP API (matches service.port: 8080)
       - "50051:50051" # gRPC (matches grpcService.port: 50051)
+    # Memory limits to prevent OOM crashes during HNSW index construction
+    # Weaviate needs ~10-30x vector size for HNSW indexing
+    # 7721 vectors × 1024 dims × 4 bytes = ~31MB raw, ~300-900MB for HNSW
+    deploy:
+      resources:
+        limits:
+          memory: 1500M
+        reservations:
+          memory: 512M
     environment:
       # Cluster configuration (matches env.CLUSTER_HOSTNAME)
       CLUSTER_HOSTNAME: weaviate-0
@@ -195,6 +204,10 @@ services:
 
       # Persistence
       PERSISTENCE_DATA_PATH: /var/lib/weaviate
+
+      # Memory management - prevents OOM by having Weaviate manage its own limits
+      LIMIT_RESOURCES: "true"
+      GOMEMLIMIT: "1200MiB"
     volumes:
       - weaviate-data:/var/lib/weaviate
     healthcheck:

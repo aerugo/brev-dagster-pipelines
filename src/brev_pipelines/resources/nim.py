@@ -4,6 +4,42 @@ import requests
 from dagster import ConfigurableResource
 from pydantic import Field
 
+# =============================================================================
+# Exception Types
+# =============================================================================
+
+
+class NIMError(Exception):
+    """Base exception for NIM errors."""
+
+    pass
+
+
+class NIMTimeoutError(NIMError):
+    """Raised when NIM request times out."""
+
+    pass
+
+
+class NIMServerError(NIMError):
+    """Raised when NIM returns 5xx error."""
+
+    def __init__(self, status_code: int, message: str) -> None:
+        """Initialize with status code and message."""
+        self.status_code = status_code
+        super().__init__(f"NIM server error {status_code}: {message}")
+
+
+class NIMRateLimitError(NIMError):
+    """Raised when NIM returns 429 rate limit error."""
+
+    pass
+
+
+# =============================================================================
+# Resource
+# =============================================================================
+
 
 class NIMResource(ConfigurableResource):  # type: ignore[type-arg]
     """NVIDIA NIM LLM inference resource.
@@ -34,8 +70,16 @@ class NIMResource(ConfigurableResource):  # type: ignore[type-arg]
             timeout_override: Optional timeout override for this specific request.
 
         Returns:
-            Generated text, or error message if generation fails.
+            Generated text.
+
+        Raises:
+            NIMTimeoutError: Request timed out.
+            NIMServerError: Server returned 5xx error.
+            NIMRateLimitError: Server returned 429 rate limit.
+            NIMError: Other NIM-related errors.
         """
+        effective_timeout = timeout_override or self.timeout
+
         try:
             response = requests.post(
                 f"{self.endpoint}/v1/chat/completions",
@@ -45,16 +89,28 @@ class NIMResource(ConfigurableResource):  # type: ignore[type-arg]
                     "max_tokens": max_tokens,
                     "temperature": temperature,
                 },
-                timeout=timeout_override or self.timeout,
+                timeout=effective_timeout,
             )
-            response.raise_for_status()
-            data = response.json()
-            content: str = data["choices"][0]["message"]["content"]
-            return content.strip()
-        except requests.exceptions.Timeout:
-            return f"LLM error: Request timed out after {timeout_override or self.timeout}s"
-        except Exception as e:
-            return f"LLM error: {e}"
+        except requests.exceptions.Timeout as e:
+            raise NIMTimeoutError(f"NIM request timed out after {effective_timeout}s: {e}") from e
+        except requests.exceptions.ConnectionError as e:
+            raise NIMError(f"NIM connection failed: {e}") from e
+        except requests.exceptions.RequestException as e:
+            raise NIMError(f"NIM request failed: {e}") from e
+
+        # Handle HTTP errors
+        if response.status_code == 429:
+            raise NIMRateLimitError(f"NIM rate limited: {response.text}")
+
+        if response.status_code >= 500:
+            raise NIMServerError(response.status_code, response.text)
+
+        if response.status_code != 200:
+            raise NIMError(f"NIM error {response.status_code}: {response.text}")
+
+        data = response.json()
+        content: str = data["choices"][0]["message"]["content"]
+        return content.strip()
 
     def generate_batch(
         self,

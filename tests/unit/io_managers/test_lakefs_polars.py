@@ -89,7 +89,7 @@ class TestLakeFSPolarsIOManagerInit:
 class TestLakeFSPolarsIOManagerHandleOutput:
     """Tests for handle_output method."""
 
-    @patch("lakefs_sdk.models.CommitCreation")
+    @patch("brev_pipelines.io_managers.lakefs_polars.CommitCreation")
     @patch("brev_pipelines.resources.minio.Minio")
     @patch("lakefs_sdk.client.LakeFSClient")
     def test_handle_output_stores_and_commits(
@@ -137,7 +137,7 @@ class TestLakeFSPolarsIOManagerHandleOutput:
         # Verify commit was created
         mock_lakefs_client.commits_api.commit.assert_called_once()
 
-    @patch("lakefs_sdk.models.CommitCreation")
+    @patch("brev_pipelines.io_managers.lakefs_polars.CommitCreation")
     @patch("brev_pipelines.resources.minio.Minio")
     @patch("lakefs_sdk.client.LakeFSClient")
     def test_handle_output_skips_none(
@@ -174,7 +174,7 @@ class TestLakeFSPolarsIOManagerHandleOutput:
         mock_lakefs_client.objects_api.upload_object.assert_not_called()
         mock_lakefs_client.commits_api.commit.assert_not_called()
 
-    @patch("lakefs_sdk.models.CommitCreation")
+    @patch("brev_pipelines.io_managers.lakefs_polars.CommitCreation")
     @patch("brev_pipelines.resources.minio.Minio")
     @patch("lakefs_sdk.client.LakeFSClient")
     def test_handle_output_uses_asset_key_for_path(
@@ -215,7 +215,7 @@ class TestLakeFSPolarsIOManagerHandleOutput:
         upload_call = mock_lakefs_client.objects_api.upload_object.call_args
         assert upload_call.kwargs["path"] == "products/speeches_data.parquet"
 
-    @patch("lakefs_sdk.models.CommitCreation")
+    @patch("brev_pipelines.io_managers.lakefs_polars.CommitCreation")
     @patch("brev_pipelines.resources.minio.Minio")
     @patch("lakefs_sdk.client.LakeFSClient")
     def test_handle_output_commit_includes_metadata(

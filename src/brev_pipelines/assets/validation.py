@@ -18,9 +18,10 @@ from typing import Any
 
 import dagster as dg
 
-from brev_pipelines.resources.lakefs import LakeFSResource
+from brev_pipelines.resources.lakefs import LakeFSConnectionError, LakeFSResource
 from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.nim import NIMResource
+from brev_pipelines.resources.weaviate import WeaviateConnectionError, WeaviateResource
 
 
 @dataclass
@@ -212,6 +213,12 @@ def validate_lakefs(
             result.tests.append({"name": "connection", "passed": health})
             if not health:
                 result.passed = False
+        except LakeFSConnectionError as e:
+            result.tests.append(
+                {"name": "connection", "passed": False, "error": str(e), "error_type": "connection"}
+            )
+            result.passed = False
+            raise
         except Exception as e:
             result.tests.append({"name": "connection", "passed": False, "error": str(e)})
             result.passed = False
@@ -229,6 +236,16 @@ def validate_lakefs(
                     "repositories": repos,
                 }
             )
+        except LakeFSConnectionError as e:
+            result.tests.append(
+                {
+                    "name": "list_repositories",
+                    "passed": False,
+                    "error": str(e),
+                    "error_type": "connection",
+                }
+            )
+            result.passed = False
         except Exception as e:
             result.tests.append({"name": "list_repositories", "passed": False, "error": str(e)})
             result.passed = False
@@ -245,6 +262,16 @@ def validate_lakefs(
                     "endpoint": lakefs.endpoint,
                 }
             )
+        except LakeFSConnectionError as e:
+            result.tests.append(
+                {
+                    "name": "api_version",
+                    "passed": False,
+                    "error": str(e),
+                    "error_type": "connection",
+                }
+            )
+            # Not a critical failure
         except Exception as e:
             result.tests.append({"name": "api_version", "passed": False, "error": str(e)})
             # Not a critical failure
@@ -348,6 +375,88 @@ def validate_nim(
 
 
 # =============================================================================
+# Weaviate Validation
+# =============================================================================
+
+
+@dg.asset(
+    description="Validate Weaviate vector database connectivity and operations",
+    group_name="validation",
+    metadata={"validation_type": "vector_db"},
+)
+def validate_weaviate(
+    context: dg.AssetExecutionContext,
+    weaviate: WeaviateResource,
+) -> dict[str, Any]:
+    """Comprehensive Weaviate validation.
+
+    Tests:
+    1. Connection - Can connect to Weaviate
+    2. Schema access - Can list collections
+    """
+    start = time.time()
+    result = ValidationResult(component="weaviate", passed=True)
+
+    try:
+        # Test 1: Connection
+        context.log.info("Test 1: Weaviate connection...")
+        try:
+            client = weaviate.get_client()
+            is_ready = client.is_ready()
+            result.tests.append(
+                {
+                    "name": "connection",
+                    "passed": is_ready,
+                    "error": None if is_ready else "Weaviate not ready",
+                }
+            )
+            if not is_ready:
+                result.passed = False
+                result.error = "Weaviate not ready"
+                result.duration_ms = (time.time() - start) * 1000
+                return result.to_dict()
+        except WeaviateConnectionError as e:
+            result.tests.append(
+                {"name": "connection", "passed": False, "error": str(e), "error_type": "connection"}
+            )
+            result.passed = False
+            result.error = str(e)
+            result.duration_ms = (time.time() - start) * 1000
+            return result.to_dict()
+        except Exception as e:
+            result.tests.append({"name": "connection", "passed": False, "error": str(e)})
+            result.passed = False
+            result.error = str(e)
+            result.duration_ms = (time.time() - start) * 1000
+            return result.to_dict()
+
+        # Test 2: Schema access (list collections)
+        context.log.info("Test 2: Schema access...")
+        try:
+            collections = client.collections.list_all()
+            collection_names = list(collections.keys()) if collections else []
+            result.tests.append(
+                {
+                    "name": "schema_access",
+                    "passed": True,
+                    "collection_count": len(collection_names),
+                    "collections": collection_names[:10],  # Limit for logging
+                }
+            )
+        except Exception as e:
+            result.tests.append({"name": "schema_access", "passed": False, "error": str(e)})
+            # Not critical - connection worked
+
+    except Exception as e:
+        result.error = str(e)
+        result.passed = False
+
+    result.duration_ms = (time.time() - start) * 1000
+    context.log.info(f"Weaviate validation: {'PASSED' if result.passed else 'FAILED'}")
+    return result.to_dict()
+
+
+# =============================================================================
 # End-to-End Validation
 # =============================================================================
 
@@ -356,13 +465,14 @@ def validate_nim(
     description="Run complete platform validation and generate report",
     group_name="validation",
     metadata={"validation_type": "e2e"},
-    deps=[validate_minio, validate_lakefs, validate_nim],
+    deps=[validate_minio, validate_lakefs, validate_nim, validate_weaviate],
 )
 def validate_platform(
     context: dg.AssetExecutionContext,
     validate_minio: dict[str, Any],
     validate_lakefs: dict[str, Any],
     validate_nim: dict[str, Any],
+    validate_weaviate: dict[str, Any],
     minio: MinIOResource,
 ) -> dict[str, Any]:
     """Complete platform validation with comprehensive report.
@@ -377,6 +487,7 @@ def validate_platform(
         "minio": validate_minio,
         "lakefs": validate_lakefs,
         "nim": validate_nim,
+        "weaviate": validate_weaviate,
     }
 
     # Calculate overall status
@@ -389,6 +500,7 @@ def validate_platform(
         "minio": "✅ PASSED" if validate_minio["passed"] else "❌ FAILED",
         "lakefs": "✅ PASSED" if validate_lakefs["passed"] else "❌ FAILED",
         "nim": "✅ PASSED" if validate_nim["passed"] else "❌ FAILED",
+        "weaviate": "✅ PASSED" if validate_weaviate["passed"] else "❌ FAILED",
     }
     report: dict[str, object] = {
         "validation_run": {
@@ -465,6 +577,7 @@ def quick_health_check(
     minio: MinIOResource,
     lakefs: LakeFSResource,
     nim: NIMResource,
+    weaviate: WeaviateResource,
 ) -> dict[str, Any]:
     """Quick health check of all services.
 
@@ -486,6 +599,12 @@ def quick_health_check(
     try:
         health = lakefs.health_check()
         results["lakefs"] = {"status": "healthy" if health else "unhealthy", "error": None}
+    except LakeFSConnectionError as e:
+        results["lakefs"] = {
+            "status": "unhealthy",
+            "error": str(e)[:100],
+            "error_type": "connection",
+        }
     except Exception as e:
         results["lakefs"] = {"status": "unhealthy", "error": str(e)[:100]}
 
@@ -495,6 +614,20 @@ def quick_health_check(
         results["nim"] = {"status": "healthy" if health else "unhealthy", "error": None}
     except Exception as e:
         results["nim"] = {"status": "unhealthy", "error": str(e)[:100]}
+
+    # Weaviate
+    try:
+        weaviate_client = weaviate.get_client()
+        is_ready = weaviate_client.is_ready()
+        results["weaviate"] = {"status": "healthy" if is_ready else "unhealthy", "error": None}
+    except WeaviateConnectionError as e:
+        results["weaviate"] = {
+            "status": "unhealthy",
+            "error": str(e)[:100],
+            "error_type": "connection",
+        }
+    except Exception as e:
+        results["weaviate"] = {"status": "unhealthy", "error": str(e)[:100]}
 
     # Summary
     all_healthy = all(r["status"] == "healthy" for r in results.values())
@@ -520,6 +653,7 @@ validation_assets = [
     validate_minio,
     validate_lakefs,
     validate_nim,
+    validate_weaviate,
     validate_platform,
     quick_health_check,
 ]

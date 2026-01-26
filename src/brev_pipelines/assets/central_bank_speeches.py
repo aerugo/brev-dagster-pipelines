@@ -24,22 +24,39 @@ Trial Run Mode:
 """
 
 import io
-import json
-import re
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import dagster as dg
 import polars as pl
 
 from brev_pipelines.config import PipelineConfig
 from brev_pipelines.io_managers.checkpoint import LLMCheckpointManager, process_with_checkpoint
-from brev_pipelines.resources.lakefs import LakeFSResource
+from brev_pipelines.resources.lakefs import (
+    LakeFSConnectionError,
+    LakeFSError,
+    LakeFSResource,
+)
+from brev_pipelines.resources.llm_retry import (
+    RetryConfig,
+    retry_with_backoff,
+    validate_classification_response,
+    validate_summary_response,
+)
 from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.nim import NIMResource
 from brev_pipelines.resources.nim_embedding import NIMEmbeddingResource
-from brev_pipelines.resources.weaviate import WeaviateResource
-from brev_pipelines.types import WeaviatePropertyDef
+from brev_pipelines.resources.weaviate import (
+    WeaviateCollectionError,
+    WeaviateConnectionError,
+    WeaviateResource,
+)
+from brev_pipelines.types import (
+    LLMAssetMetadata,
+    LLMFailureBreakdown,
+    SpeechClassification,
+    WeaviatePropertyDef,
+)
 
 # Collection schema for Weaviate
 SPEECHES_SCHEMA: list[WeaviatePropertyDef] = [
@@ -137,19 +154,29 @@ def raw_speeches(
     df.write_parquet(buffer)
     parquet_bytes = buffer.getvalue()
 
-    # Get LakeFS client
-    lakefs_client = lakefs.get_client()
+    # Get LakeFS client with proper exception handling
+    try:
+        lakefs_client = lakefs.get_client()
+    except LakeFSConnectionError as e:
+        raise RuntimeError(
+            f"Cannot connect to LakeFS to store raw speeches. "
+            f"Ensure LakeFS is running and accessible. Details: {e}"
+        ) from e
 
     # Upload raw data to LakeFS
     path = "central-bank-speeches/raw_speeches.parquet"
-    lakefs_client.objects_api.upload_object(
-        repository="data",
-        branch="main",
-        path=path,
-        content=parquet_bytes,
-    )
+    try:
+        lakefs_client.objects_api.upload_object(
+            repository="data",
+            branch="main",
+            path=path,
+            content=parquet_bytes,
+        )
+    except LakeFSError as e:
+        raise RuntimeError(f"Failed to upload raw speeches to LakeFS: {e}") from e
 
     # Create commit for versioned raw data (skip if no changes)
+    # Note: Direct SDK calls raise standard exceptions, not LakeFSError
     try:
         commit = lakefs_client.commits_api.commit(
             repository="data",
@@ -450,9 +477,16 @@ def speech_classification(
         checkpoint_interval=10,
     )
 
+    # Retry configuration for LLM calls
+    retry_config = RetryConfig(
+        max_retries=5,
+        base_delay=1.0,
+        exponential_base=2.0,
+    )
+
     def classify_speech(row: dict[str, Any]) -> dict[str, Any]:
-        """Classify a single speech and return result dict."""
-        reference = row["reference"]
+        """Classify a single speech with retry logic and dead letter tracking."""
+        reference = str(row["reference"])
         text_excerpt = (row.get("text", "") or "")[:4000]
         title = row.get("title", "") or "Untitled"
         speaker = row.get("speaker", "") or "Unknown"
@@ -476,27 +510,40 @@ Respond with ONLY a JSON object in this exact format:
 
 Classification:"""
 
-        response = nim_reasoning.generate(prompt, max_tokens=150, temperature=0.1)
+        def get_fallback() -> SpeechClassification:
+            """Return neutral fallback values."""
+            return SpeechClassification(
+                monetary_stance=3,
+                trade_stance=3,
+                tariff_mention=0,
+                economic_outlook=3,
+            )
 
-        # Parse response with fallback to neutral values
-        monetary, trade, tariff, outlook = 3, 3, 0, 3
-        try:
-            json_match = re.search(r"\{[^}]+\}", response)
-            if json_match:
-                result = json.loads(json_match.group())
-                monetary = MONETARY_STANCE_SCALE.get(result.get("monetary_stance", "neutral"), 3)
-                trade = TRADE_STANCE_SCALE.get(result.get("trade_stance", "neutral"), 3)
-                tariff = int(result.get("tariff_mention", 0))
-                outlook = OUTLOOK_SCALE.get(result.get("economic_outlook", "neutral"), 3)
-        except Exception:
-            pass  # Keep defaults
+        # Execute with retry wrapper
+        result = retry_with_backoff(
+            fn=lambda: nim_reasoning.generate(prompt, max_tokens=150, temperature=0.1),
+            validate_fn=validate_classification_response,
+            record_id=reference,
+            fallback_fn=get_fallback,
+            config=retry_config,
+            logger=context.log,
+        )
+
+        # Get values (either parsed or fallback)
+        values = result.parsed_data if result.status == "success" else result.fallback_values
+        if values is None:
+            values = get_fallback()
 
         return {
             "reference": reference,
-            "monetary_stance": monetary,
-            "trade_stance": trade,
-            "tariff_mention": tariff,
-            "economic_outlook": outlook,
+            "monetary_stance": values["monetary_stance"],
+            "trade_stance": values["trade_stance"],
+            "tariff_mention": values["tariff_mention"],
+            "economic_outlook": values["economic_outlook"],
+            "_llm_status": result.status,
+            "_llm_error": result.error_message,
+            "_llm_attempts": result.attempts,
+            "_llm_fallback_used": result.fallback_used,
         }
 
     # Process with checkpointing
@@ -517,7 +564,7 @@ Classification:"""
         msg = "Classification checkpoint returned no results"
         raise RuntimeError(msg)
 
-    # Join results back to original DataFrame
+    # Join results back to original DataFrame (including dead letter columns)
     df = df.join(
         results_df.select(
             [
@@ -526,13 +573,101 @@ Classification:"""
                 pl.col("trade_stance").cast(pl.Int8),
                 pl.col("tariff_mention").cast(pl.Int8),
                 pl.col("economic_outlook").cast(pl.Int8),
+                pl.col("_llm_status").cast(pl.Utf8),
+                pl.col("_llm_error").cast(pl.Utf8),
+                pl.col("_llm_attempts").cast(pl.Int64),
+                pl.col("_llm_fallback_used").cast(pl.Boolean),
             ]
         ),
         on="reference",
         how="left",
     )
 
-    # Log classification statistics
+    # Calculate classification statistics
+    total = len(df)
+    failed_df = df.filter(pl.col("_llm_status") == "failed")
+    failed_count = failed_df.height
+    success_count = total - failed_count
+    success_rate = f"{100 * success_count / total:.1f}%" if total > 0 else "N/A"
+
+    # Calculate failure breakdown by error type
+    failure_breakdown: LLMFailureBreakdown = {
+        "ValidationError": 0,
+        "LLMTimeoutError": 0,
+        "LLMRateLimitError": 0,
+        "LLMServerError": 0,
+        "unexpected_error": 0,
+    }
+    if failed_count > 0:
+        error_types = failed_df["_llm_error"].to_list()
+        for error in error_types:
+            error_str = str(error) if error else ""
+            if "ValidationError" in error_str:
+                failure_breakdown["ValidationError"] += 1
+            elif "LLMTimeoutError" in error_str or "timeout" in error_str.lower():
+                failure_breakdown["LLMTimeoutError"] += 1
+            elif "LLMRateLimitError" in error_str or "429" in error_str:
+                failure_breakdown["LLMRateLimitError"] += 1
+            elif "LLMServerError" in error_str or any(
+                code in error_str for code in ("500", "502", "503", "504")
+            ):
+                failure_breakdown["LLMServerError"] += 1
+            else:
+                failure_breakdown["unexpected_error"] += 1
+
+    # Calculate average attempts
+    avg_attempts = df.select(pl.col("_llm_attempts").mean()).item() or 1.0
+
+    # Get failed references (limit to 100)
+    failed_refs = failed_df["reference"].to_list()[:100] if failed_count > 0 else []
+
+    # Build metadata
+    metadata: LLMAssetMetadata = {
+        "total_processed": total,
+        "successful": success_count,
+        "failed": failed_count,
+        "success_rate": success_rate,
+        "failed_references": [str(ref) for ref in failed_refs],
+        "failure_breakdown": failure_breakdown,
+        "avg_attempts": float(avg_attempts),
+        "total_duration_ms": 0,  # Not tracked at asset level
+    }
+
+    # Add metadata to Dagster context (single call - Dagster limitation)
+    output_metadata: dict[str, object] = {
+        "total_processed": total,
+        "successful": success_count,
+        "failed": failed_count,
+        "success_rate": success_rate,
+        "failure_breakdown": dict(failure_breakdown),
+        "avg_attempts": round(metadata["avg_attempts"], 2),
+    }
+    if failed_count > 0:
+        output_metadata["failed_references"] = metadata["failed_references"][:100]
+    context.add_output_metadata(output_metadata)
+
+    # Structured logging
+    context.log.info("=" * 60)
+    context.log.info("CLASSIFICATION SUMMARY")
+    context.log.info("=" * 60)
+    context.log.info(f"Total records:     {total}")
+    context.log.info(f"Successful:        {success_count} ({success_rate})")
+    context.log.info(f"Failed (fallback): {failed_count}")
+    context.log.info(f"Average attempts:  {metadata['avg_attempts']:.2f}")
+
+    if failed_count > 0:
+        context.log.info("-" * 40)
+        context.log.info("FAILURE BREAKDOWN:")
+        breakdown_dict = cast("dict[str, int]", dict(failure_breakdown))
+        for error_type, count in breakdown_dict.items():
+            if count > 0:
+                context.log.info(f"  {error_type}: {count}")
+        context.log.info("-" * 40)
+        context.log.warning(f"Failed references (first 10): {metadata['failed_references'][:10]}")
+
+    context.log.info("=" * 60)
+
+    # Classification distribution stats
     context.log.info(f"Monetary stance distribution: {df['monetary_stance'].value_counts()}")
     context.log.info(f"Trade stance distribution: {df['trade_stance'].value_counts()}")
     tariff_count = df.filter(pl.col("tariff_mention") == 1).height
@@ -602,9 +737,16 @@ def speech_summaries(
         checkpoint_interval=10,
     )
 
+    # Retry configuration for LLM calls
+    retry_config = RetryConfig(
+        max_retries=5,
+        base_delay=1.0,
+        exponential_base=2.0,
+    )
+
     def summarize_speech(row: dict[str, Any]) -> dict[str, Any]:
-        """Generate summary for a single speech and return result dict."""
-        reference = row["reference"]
+        """Generate summary with retry logic and dead letter tracking."""
+        reference = str(row["reference"])
         title = row.get("title", "") or "Untitled"
         speaker = row.get("speaker", "") or "Unknown"
         central_bank = row.get("central_bank", "") or "Unknown"
@@ -632,17 +774,33 @@ Text excerpt:
 
 Generate a COMPACT bullet-point summary (under 1000 characters total):"""
 
-        summary = nim_reasoning.generate(prompt, max_tokens=400, temperature=0.2)
+        def get_fallback() -> str:
+            """Return fallback summary with basic info."""
+            return f"• Topic: {title[:100]}\n• Speaker: {speaker}\n• Bank: {central_bank}"
 
-        # Handle LLM errors with fallback
-        if summary.startswith("LLM error:"):
-            summary = f"• Topic: {title[:100]}\n• Speaker: {speaker}\n• Bank: {central_bank}"
+        # Execute with retry wrapper
+        result = retry_with_backoff(
+            fn=lambda: nim_reasoning.generate(prompt, max_tokens=400, temperature=0.2),
+            validate_fn=validate_summary_response,
+            record_id=reference,
+            fallback_fn=get_fallback,
+            config=retry_config,
+            logger=context.log,
+        )
 
-        # Truncate if too long
-        if len(summary) > 1500:
-            summary = summary[:1500] + "..."
+        # Get summary (either parsed or fallback)
+        summary = result.parsed_data if result.status == "success" else result.fallback_values
+        if summary is None:
+            summary = get_fallback()
 
-        return {"reference": reference, "summary": summary}
+        return {
+            "reference": reference,
+            "summary": summary,
+            "_llm_status": result.status,
+            "_llm_error": result.error_message,
+            "_llm_attempts": result.attempts,
+            "_llm_fallback_used": result.fallback_used,
+        }
 
     # Process with checkpointing
     context.log.info(f"Starting summarization of {len(df)} speeches with checkpointing")
@@ -662,16 +820,87 @@ Generate a COMPACT bullet-point summary (under 1000 characters total):"""
         msg = "Summarization checkpoint returned no results"
         raise RuntimeError(msg)
 
-    # Log summary statistics
+    # Calculate summary statistics
+    total = len(results_df)
+    failed_df = results_df.filter(pl.col("_llm_status") == "failed")
+    failed_count = failed_df.height
+    success_count = total - failed_count
+    success_rate = f"{100 * success_count / total:.1f}%" if total > 0 else "N/A"
+
+    # Calculate failure breakdown by error type
+    failure_breakdown: LLMFailureBreakdown = {
+        "ValidationError": 0,
+        "LLMTimeoutError": 0,
+        "LLMRateLimitError": 0,
+        "LLMServerError": 0,
+        "unexpected_error": 0,
+    }
+    if failed_count > 0:
+        error_types = failed_df["_llm_error"].to_list()
+        for error in error_types:
+            error_str = str(error) if error else ""
+            if "ValidationError" in error_str:
+                failure_breakdown["ValidationError"] += 1
+            elif "LLMTimeoutError" in error_str or "timeout" in error_str.lower():
+                failure_breakdown["LLMTimeoutError"] += 1
+            elif "LLMRateLimitError" in error_str or "429" in error_str:
+                failure_breakdown["LLMRateLimitError"] += 1
+            elif "LLMServerError" in error_str or any(
+                code in error_str for code in ("500", "502", "503", "504")
+            ):
+                failure_breakdown["LLMServerError"] += 1
+            else:
+                failure_breakdown["unexpected_error"] += 1
+
+    # Calculate average attempts
+    avg_attempts = results_df.select(pl.col("_llm_attempts").mean()).item() or 1.0
+
+    # Get failed references (limit to 100)
+    failed_refs = failed_df["reference"].to_list()[:100] if failed_count > 0 else []
+
+    # Add metadata to Dagster context (single call - Dagster limitation)
+    output_metadata: dict[str, object] = {
+        "total_processed": total,
+        "successful": success_count,
+        "failed": failed_count,
+        "success_rate": success_rate,
+        "failure_breakdown": dict(failure_breakdown),
+        "avg_attempts": round(float(avg_attempts), 2),
+    }
+    if failed_count > 0:
+        output_metadata["failed_references"] = [str(ref) for ref in failed_refs][:100]
+    context.add_output_metadata(output_metadata)
+
+    # Structured logging
+    context.log.info("=" * 60)
+    context.log.info("SUMMARIZATION SUMMARY")
+    context.log.info("=" * 60)
+    context.log.info(f"Total records:     {total}")
+    context.log.info(f"Successful:        {success_count} ({success_rate})")
+    context.log.info(f"Failed (fallback): {failed_count}")
+    context.log.info(f"Average attempts:  {float(avg_attempts):.2f}")
+
+    if failed_count > 0:
+        context.log.info("-" * 40)
+        context.log.info("FAILURE BREAKDOWN:")
+        breakdown_dict = cast("dict[str, int]", dict(failure_breakdown))
+        for error_type, count in breakdown_dict.items():
+            if count > 0:
+                context.log.info(f"  {error_type}: {count}")
+        context.log.info("-" * 40)
+        context.log.warning(
+            f"Failed references (first 10): {[str(ref) for ref in failed_refs[:10]]}"
+        )
+
+    context.log.info("=" * 60)
+
+    # Summary length statistics
     summaries = results_df["summary"].to_list()
     summary_lengths = [len(s) for s in summaries]
     avg_len = sum(summary_lengths) / len(summary_lengths) if summary_lengths else 0
     max_len = max(summary_lengths) if summary_lengths else 0
     min_len = min(summary_lengths) if summary_lengths else 0
-    context.log.info(
-        f"Generated {len(summaries)} compact summaries: "
-        f"avg={avg_len:.0f} chars, min={min_len}, max={max_len}"
-    )
+    context.log.info(f"Summary lengths: avg={avg_len:.0f} chars, min={min_len}, max={max_len}")
 
     return results_df
 
@@ -707,18 +936,55 @@ def enriched_speeches(
     df_with_embeddings, _ = speech_embeddings
     df_with_classification = speech_classification
 
-    # Join classification results (monetary_stance, trade_stance, tariff_mention, economic_outlook)
+    # Join classification results with dead letter columns (renamed with _class suffix)
+    classification_cols = [
+        "reference",
+        "monetary_stance",
+        "trade_stance",
+        "tariff_mention",
+        "economic_outlook",
+        "_llm_status",
+        "_llm_error",
+        "_llm_attempts",
+        "_llm_fallback_used",
+    ]
+    df_classification_renamed = df_with_classification.select(
+        [c for c in classification_cols if c in df_with_classification.columns]
+    ).rename(
+        {
+            "_llm_status": "_llm_status_class",
+            "_llm_error": "_llm_error_class",
+            "_llm_attempts": "_llm_attempts_class",
+            "_llm_fallback_used": "_llm_fallback_class",
+        }
+    )
     df = df_with_embeddings.join(
-        df_with_classification.select(
-            ["reference", "monetary_stance", "trade_stance", "tariff_mention", "economic_outlook"]
-        ),
+        df_classification_renamed,
         on="reference",
         how="left",
     )
 
-    # Join summaries
+    # Join summaries with dead letter columns (renamed with _summary suffix)
+    summary_cols = [
+        "reference",
+        "summary",
+        "_llm_status",
+        "_llm_error",
+        "_llm_attempts",
+        "_llm_fallback_used",
+    ]
+    df_summaries_renamed = speech_summaries.select(
+        [c for c in summary_cols if c in speech_summaries.columns]
+    ).rename(
+        {
+            "_llm_status": "_llm_status_summary",
+            "_llm_error": "_llm_error_summary",
+            "_llm_attempts": "_llm_attempts_summary",
+            "_llm_fallback_used": "_llm_fallback_summary",
+        }
+    )
     df = df.join(
-        speech_summaries.select(["reference", "summary"]),
+        df_summaries_renamed,
         on="reference",
         how="left",
     )
@@ -788,8 +1054,14 @@ def speeches_data_product(
     df.write_parquet(buffer)
     parquet_bytes = buffer.getvalue()
 
-    # Get LakeFS client
-    lakefs_client = lakefs.get_client()
+    # Get LakeFS client with proper exception handling
+    try:
+        lakefs_client = lakefs.get_client()
+    except LakeFSConnectionError as e:
+        raise RuntimeError(
+            f"Cannot connect to LakeFS to store speeches data product. "
+            f"Ensure LakeFS is running and accessible. Details: {e}"
+        ) from e
 
     # Upload to LakeFS - use trial path if is_trial
     if config.is_trial:
@@ -797,14 +1069,19 @@ def speeches_data_product(
         context.log.info("TRIAL RUN: Using trial-specific LakeFS path")
     else:
         path = "central-bank-speeches/speeches.parquet"
-    lakefs_client.objects_api.upload_object(
-        repository="data",
-        branch="main",
-        path=path,
-        content=parquet_bytes,
-    )
+
+    try:
+        lakefs_client.objects_api.upload_object(
+            repository="data",
+            branch="main",
+            path=path,
+            content=parquet_bytes,
+        )
+    except LakeFSError as e:
+        raise RuntimeError(f"Failed to upload speeches data product to LakeFS: {e}") from e
 
     # Create commit (skip if no changes)
+    # Note: Direct SDK calls raise standard exceptions, not LakeFSError
     tariff_count = df.filter(pl.col("tariff_mention") == 1).height
     commit_id = None
     try:
@@ -887,12 +1164,22 @@ def weaviate_index(
     else:
         collection_name = "CentralBankSpeeches"
 
-    # Ensure collection exists
-    weaviate.ensure_collection(
-        name=collection_name,
-        properties=SPEECHES_SCHEMA,
-        vector_dimensions=len(embeddings[0]),
-    )
+    # Ensure collection exists with proper exception handling
+    try:
+        weaviate.ensure_collection(
+            name=collection_name,
+            properties=SPEECHES_SCHEMA,
+            vector_dimensions=len(embeddings[0]),
+        )
+    except WeaviateConnectionError as e:
+        raise RuntimeError(
+            f"Cannot connect to Weaviate to create collection {collection_name}. "
+            f"Ensure Weaviate is running and accessible. Details: {e}"
+        ) from e
+    except WeaviateCollectionError as e:
+        raise RuntimeError(
+            f"Failed to create or verify Weaviate collection {collection_name}: {e}"
+        ) from e
 
     # Prepare objects for insertion
     objects: list[dict[str, Any]] = []
@@ -914,11 +1201,21 @@ def weaviate_index(
         )
 
     # Insert objects with embeddings
-    count = weaviate.insert_objects(
-        collection_name=collection_name,
-        objects=objects,
-        vectors=embeddings,
-    )
+    try:
+        count = weaviate.insert_objects(
+            collection_name=collection_name,
+            objects=objects,
+            vectors=embeddings,
+        )
+    except WeaviateConnectionError as e:
+        raise RuntimeError(
+            f"Cannot connect to Weaviate to insert objects into {collection_name}. "
+            f"Ensure Weaviate is running and accessible. Details: {e}"
+        ) from e
+    except WeaviateCollectionError as e:
+        raise RuntimeError(
+            f"Failed to insert {len(objects)} objects into Weaviate collection {collection_name}: {e}"
+        ) from e
 
     context.log.info(f"Indexed {count} speeches in Weaviate collection: {collection_name}")
 
@@ -966,13 +1263,17 @@ def classification_snapshot(
 
     df = speech_classification
 
-    # Select only classification-relevant columns
+    # Select classification columns including dead letter tracking
     classification_cols = [
         "reference",
         "monetary_stance",
         "trade_stance",
         "tariff_mention",
         "economic_outlook",
+        "_llm_status",
+        "_llm_error",
+        "_llm_attempts",
+        "_llm_fallback_used",
     ]
     df_snapshot = df.select([c for c in classification_cols if c in df.columns])
 
@@ -981,8 +1282,14 @@ def classification_snapshot(
     df_snapshot.write_parquet(buffer)
     parquet_bytes = buffer.getvalue()
 
-    # Get LakeFS client
-    lakefs_client = lakefs.get_client()
+    # Get LakeFS client with proper exception handling
+    try:
+        lakefs_client = lakefs.get_client()
+    except LakeFSConnectionError as e:
+        raise RuntimeError(
+            f"Cannot connect to LakeFS to store classification snapshot. "
+            f"Ensure LakeFS is running and accessible. Details: {e}"
+        ) from e
 
     # Upload to LakeFS intermediate path
     if config.is_trial:
@@ -990,14 +1297,18 @@ def classification_snapshot(
     else:
         path = "central-bank-speeches/intermediate/classifications.parquet"
 
-    lakefs_client.objects_api.upload_object(
-        repository="data",
-        branch="main",
-        path=path,
-        content=parquet_bytes,
-    )
+    try:
+        lakefs_client.objects_api.upload_object(
+            repository="data",
+            branch="main",
+            path=path,
+            content=parquet_bytes,
+        )
+    except LakeFSError as e:
+        raise RuntimeError(f"Failed to upload classification snapshot to LakeFS: {e}") from e
 
     # Create commit
+    # Note: Direct SDK calls raise standard exceptions, not LakeFSError
     commit_id = None
     try:
         tariff_count = df_snapshot.filter(pl.col("tariff_mention") == 1).height
@@ -1069,16 +1380,30 @@ def summaries_snapshot(
 
     df = speech_summaries
 
-    # Select only summary-relevant columns
-    df_snapshot = df.select(["reference", "summary"])
+    # Select summary columns including dead letter tracking
+    summary_cols = [
+        "reference",
+        "summary",
+        "_llm_status",
+        "_llm_error",
+        "_llm_attempts",
+        "_llm_fallback_used",
+    ]
+    df_snapshot = df.select([c for c in summary_cols if c in df.columns])
 
     # Serialize to Parquet
     buffer = io.BytesIO()
     df_snapshot.write_parquet(buffer)
     parquet_bytes = buffer.getvalue()
 
-    # Get LakeFS client
-    lakefs_client = lakefs.get_client()
+    # Get LakeFS client with proper exception handling
+    try:
+        lakefs_client = lakefs.get_client()
+    except LakeFSConnectionError as e:
+        raise RuntimeError(
+            f"Cannot connect to LakeFS to store summaries snapshot. "
+            f"Ensure LakeFS is running and accessible. Details: {e}"
+        ) from e
 
     # Upload to LakeFS intermediate path
     if config.is_trial:
@@ -1086,14 +1411,18 @@ def summaries_snapshot(
     else:
         path = "central-bank-speeches/intermediate/summaries.parquet"
 
-    lakefs_client.objects_api.upload_object(
-        repository="data",
-        branch="main",
-        path=path,
-        content=parquet_bytes,
-    )
+    try:
+        lakefs_client.objects_api.upload_object(
+            repository="data",
+            branch="main",
+            path=path,
+            content=parquet_bytes,
+        )
+    except LakeFSError as e:
+        raise RuntimeError(f"Failed to upload summaries snapshot to LakeFS: {e}") from e
 
     # Create commit
+    # Note: Direct SDK calls raise standard exceptions, not LakeFSError
     commit_id = None
     try:
         commit = lakefs_client.commits_api.commit(
@@ -1188,8 +1517,14 @@ def embeddings_snapshot(
     df_snapshot.write_parquet(buffer)
     parquet_bytes = buffer.getvalue()
 
-    # Get LakeFS client
-    lakefs_client = lakefs.get_client()
+    # Get LakeFS client with proper exception handling
+    try:
+        lakefs_client = lakefs.get_client()
+    except LakeFSConnectionError as e:
+        raise RuntimeError(
+            f"Cannot connect to LakeFS to store embeddings snapshot. "
+            f"Ensure LakeFS is running and accessible. Details: {e}"
+        ) from e
 
     # Upload to LakeFS intermediate path
     if config.is_trial:
@@ -1197,14 +1532,18 @@ def embeddings_snapshot(
     else:
         path = "central-bank-speeches/intermediate/embeddings.parquet"
 
-    lakefs_client.objects_api.upload_object(
-        repository="data",
-        branch="main",
-        path=path,
-        content=parquet_bytes,
-    )
+    try:
+        lakefs_client.objects_api.upload_object(
+            repository="data",
+            branch="main",
+            path=path,
+            content=parquet_bytes,
+        )
+    except LakeFSError as e:
+        raise RuntimeError(f"Failed to upload embeddings snapshot to LakeFS: {e}") from e
 
     # Create commit
+    # Note: Direct SDK calls raise standard exceptions, not LakeFSError
     commit_id = None
     try:
         commit = lakefs_client.commits_api.commit(

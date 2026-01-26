@@ -218,7 +218,9 @@ class TestWaitForReady:
 
         resource = SafeSynthesizerResource()
 
-        with pytest.raises(TimeoutError, match="not ready"):
+        from brev_pipelines.resources.safe_synth_retry import SafeSynthTimeoutError
+
+        with pytest.raises(SafeSynthTimeoutError, match="not ready"):
             resource._wait_for_ready(timeout=10)
 
 
@@ -313,7 +315,9 @@ class TestWaitForJob:
 
         resource = SafeSynthesizerResource()
 
-        with pytest.raises(RuntimeError, match="failed"):
+        from brev_pipelines.resources.safe_synth_retry import SafeSynthJobFailedError
+
+        with pytest.raises(SafeSynthJobFailedError, match="failed"):
             resource.wait_for_job("failed-job")
 
     @patch("brev_pipelines.resources.safe_synth.time.sleep")
@@ -341,7 +345,9 @@ class TestWaitForJob:
 
         resource = SafeSynthesizerResource(max_wait_time=7200)
 
-        with pytest.raises(TimeoutError, match="did not complete"):
+        from brev_pipelines.resources.safe_synth_retry import SafeSynthTimeoutError
+
+        with pytest.raises(SafeSynthTimeoutError, match="did not complete"):
             resource.wait_for_job("stuck-job")
 
 

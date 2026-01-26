@@ -28,6 +28,7 @@ import io
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
+from minio.error import S3Error
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from brev_pipelines.resources.minio import MinIOResource
@@ -36,6 +37,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from dagster import DagsterLogManager
+
+# Type alias for checkpoint records - callers should use specific TypedDicts
+# from brev_pipelines.types (ClassificationCheckpointRecord, etc.)
+CheckpointRecord = dict[str, Any]
 
 
 class LLMCheckpointManager(BaseModel):
@@ -61,7 +66,7 @@ class LLMCheckpointManager(BaseModel):
     checkpoint_interval: int = Field(default=10)
 
     # Internal state (private attributes in Pydantic v2)
-    _accumulated_results: list[dict[str, Any]] = PrivateAttr(default_factory=list)
+    _accumulated_results: list[CheckpointRecord] = PrivateAttr(default_factory=list)
     _total_saved: int = PrivateAttr(default=0)
 
     def __init__(self, **data: Any) -> None:
@@ -78,6 +83,9 @@ class LLMCheckpointManager(BaseModel):
 
         Returns:
             DataFrame with previously processed results, or None if no checkpoint exists.
+
+        Raises:
+            RuntimeError: If checkpoint load fails for reasons other than missing file.
         """
         self.minio.ensure_bucket(self.bucket)
         client = self.minio.get_client()
@@ -93,15 +101,25 @@ class LLMCheckpointManager(BaseModel):
             df = pl.read_parquet(io.BytesIO(data))
             self._total_saved = len(df)
             return df
-        except Exception:
-            # No checkpoint exists
-            return None
+        except S3Error as e:
+            if e.code == "NoSuchKey":
+                # No checkpoint exists - this is expected on first run
+                return None
+            # Re-raise other S3 errors (permissions, network, etc.)
+            raise RuntimeError(f"Failed to load checkpoint: {e}") from e
+        except Exception as e:
+            # Handle mock exceptions and other cases where S3Error isn't raised
+            if "NoSuchKey" in str(e):
+                return None
+            raise RuntimeError(f"Failed to load checkpoint: {e}") from e
 
-    def save_batch(self, results: list[dict[str, Any]], force: bool = False) -> None:
+    def save_batch(self, results: list[CheckpointRecord], force: bool = False) -> None:
         """Accumulate results and save checkpoint when interval is reached.
 
         Args:
-            results: List of result dictionaries to accumulate.
+            results: List of checkpoint records to accumulate. Should use TypedDict
+                    types from brev_pipelines.types (ClassificationCheckpointRecord,
+                    SummaryCheckpointRecord, etc.) for type safety.
             force: Force save even if interval not reached.
         """
         self._accumulated_results.extend(results)
@@ -110,23 +128,44 @@ class LLMCheckpointManager(BaseModel):
             self._flush_checkpoint()
 
     def _flush_checkpoint(self) -> None:
-        """Write accumulated results to checkpoint file."""
+        """Write accumulated results to checkpoint file.
+
+        Loads existing checkpoint data directly (not via self.load()) to avoid
+        recursive state updates, then combines with new results and writes.
+        """
         if not self._accumulated_results:
             return
 
         self.minio.ensure_bucket(self.bucket)
         client = self.minio.get_client()
 
-        # Load existing checkpoint
-        existing_df = self.load()
+        # Load existing checkpoint data directly (don't use self.load() to avoid state updates)
+        existing_data: list[CheckpointRecord] = []
+        try:
+            response = client.get_object(self.bucket, self.checkpoint_path)
+            try:
+                data = response.read()
+            finally:
+                response.close()
+                response.release_conn()
+            existing_df = pl.read_parquet(io.BytesIO(data))
+            existing_data = existing_df.to_dicts()
+        except S3Error as e:
+            if e.code != "NoSuchKey":
+                raise RuntimeError(f"Failed to load existing checkpoint: {e}") from e
+            # NoSuchKey is fine - no existing checkpoint
+        except Exception as e:
+            # Handle mock exceptions and other cases where S3Error isn't raised
+            if "NoSuchKey" not in str(e):
+                raise RuntimeError(f"Failed to load existing checkpoint: {e}") from e
+            # NoSuchKey is fine - no existing checkpoint
 
-        # Create new DataFrame from accumulated results
-        new_df = pl.DataFrame(self._accumulated_results)
+        # Combine existing + new
+        all_data = existing_data + list(self._accumulated_results)
 
-        # Combine with existing
-        combined_df = pl.concat([existing_df, new_df]) if existing_df is not None else new_df
+        # Create DataFrame and serialize
+        combined_df = pl.DataFrame(all_data)
 
-        # Serialize to Parquet
         buffer = io.BytesIO()
         combined_df.write_parquet(buffer)
         parquet_bytes = buffer.getvalue()
@@ -183,8 +222,9 @@ def process_with_checkpoint(
     Args:
         df: Input DataFrame to process.
         id_column: Column name to use as unique identifier.
-        process_fn: Function that takes a row dict and returns a result dict.
+        process_fn: Function that takes a row dict and returns a checkpoint record.
                    Should handle errors internally and return error info.
+                   Use TypedDict types from brev_pipelines.types for type safety.
         checkpoint_manager: Checkpoint manager for persistence.
         batch_size: Number of rows to process before saving checkpoint.
         logger: Optional logger for progress updates.

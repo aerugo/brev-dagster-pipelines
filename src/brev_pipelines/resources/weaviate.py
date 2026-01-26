@@ -20,6 +20,41 @@ if TYPE_CHECKING:
     from weaviate import WeaviateClient
 
 
+# =============================================================================
+# Exception Types
+# =============================================================================
+
+
+class WeaviateError(Exception):
+    """Base exception for Weaviate errors."""
+
+    pass
+
+
+class WeaviateConnectionError(WeaviateError):
+    """Raised when Weaviate connection fails."""
+
+    pass
+
+
+class WeaviateCollectionError(WeaviateError):
+    """Raised when collection operation fails."""
+
+    pass
+
+
+# Connection-related error patterns
+CONNECTION_ERROR_PATTERNS = (
+    "connection",
+    "timeout",
+    "network",
+    "refused",
+    "unreachable",
+    "timed out",
+    "grpc",
+)
+
+
 class WeaviateResource(ConfigurableResource):
     """Weaviate vector database resource.
 
@@ -47,18 +82,26 @@ class WeaviateResource(ConfigurableResource):
         Returns:
             Connected WeaviateClient instance.
 
+        Raises:
+            WeaviateConnectionError: Cannot connect to Weaviate.
+
         Note:
             Caller is responsible for closing the client when done.
         """
-        client = weaviate.connect_to_custom(
-            http_host=self.host,
-            http_port=self.port,
-            http_secure=False,
-            grpc_host=self.grpc_host,
-            grpc_port=self.grpc_port,
-            grpc_secure=False,
-        )
-        return client
+        try:
+            client = weaviate.connect_to_custom(
+                http_host=self.host,
+                http_port=self.port,
+                http_secure=False,
+                grpc_host=self.grpc_host,
+                grpc_port=self.grpc_port,
+                grpc_secure=False,
+            )
+            return client
+        except Exception as e:
+            raise WeaviateConnectionError(
+                f"Failed to connect to Weaviate at {self.host}:{self.port}: {e}"
+            ) from e
 
     def ensure_collection(
         self,
@@ -74,8 +117,16 @@ class WeaviateResource(ConfigurableResource):
             name: Collection name (PascalCase recommended).
             properties: List of WeaviatePropertyDef with 'name' and optional 'type', 'description'.
             vector_dimensions: Dimension of vectors to store (reserved for future use).
+
+        Raises:
+            WeaviateConnectionError: Cannot connect to Weaviate.
+            WeaviateCollectionError: Failed to create collection.
         """
-        client = self.get_client()
+        try:
+            client = self.get_client()
+        except WeaviateConnectionError:
+            raise
+
         try:
             if client.collections.exists(name):
                 return
@@ -108,6 +159,10 @@ class WeaviateResource(ConfigurableResource):
                 vectorizer_config=Configure.Vectorizer.none(),
                 properties=props,
             )
+        except WeaviateConnectionError:
+            raise
+        except Exception as e:
+            raise WeaviateCollectionError(f"Failed to ensure collection {name}: {e}") from e
         finally:
             client.close()
 
@@ -131,12 +186,18 @@ class WeaviateResource(ConfigurableResource):
 
         Raises:
             ValueError: If objects and vectors have different lengths.
+            WeaviateConnectionError: Cannot connect to Weaviate.
+            WeaviateCollectionError: Failed to insert objects.
         """
         if len(objects) != len(vectors):
             msg = f"Objects ({len(objects)}) and vectors ({len(vectors)}) must have same length"
             raise ValueError(msg)
 
-        client = self.get_client()
+        try:
+            client = self.get_client()
+        except WeaviateConnectionError:
+            raise
+
         try:
             collection = client.collections.get(collection_name)
 
@@ -145,6 +206,12 @@ class WeaviateResource(ConfigurableResource):
                     batch.add_object(properties=obj, vector=vector)
 
             return len(objects)
+        except WeaviateConnectionError:
+            raise
+        except Exception as e:
+            raise WeaviateCollectionError(
+                f"Failed to insert objects into {collection_name}: {e}"
+            ) from e
         finally:
             client.close()
 
@@ -165,8 +232,16 @@ class WeaviateResource(ConfigurableResource):
 
         Returns:
             List of WeaviateSearchResult with properties, _distance, and _certainty.
+
+        Raises:
+            WeaviateConnectionError: Cannot connect to Weaviate.
+            WeaviateCollectionError: Failed to perform search.
         """
-        client = self.get_client()
+        try:
+            client = self.get_client()
+        except WeaviateConnectionError:
+            raise
+
         try:
             collection = client.collections.get(collection_name)
 
@@ -186,6 +261,12 @@ class WeaviateResource(ConfigurableResource):
                 output.append(result)
 
             return output
+        except WeaviateConnectionError:
+            raise
+        except Exception as e:
+            raise WeaviateCollectionError(
+                f"Failed to search collection {collection_name}: {e}"
+            ) from e
         finally:
             client.close()
 
@@ -197,12 +278,26 @@ class WeaviateResource(ConfigurableResource):
 
         Returns:
             Number of objects in the collection.
+
+        Raises:
+            WeaviateConnectionError: Cannot connect to Weaviate.
+            WeaviateCollectionError: Failed to get object count.
         """
-        client = self.get_client()
+        try:
+            client = self.get_client()
+        except WeaviateConnectionError:
+            raise
+
         try:
             collection = client.collections.get(collection_name)
             response = collection.aggregate.over_all(total_count=True)
             return response.total_count or 0
+        except WeaviateConnectionError:
+            raise
+        except Exception as e:
+            raise WeaviateCollectionError(
+                f"Failed to get object count for {collection_name}: {e}"
+            ) from e
         finally:
             client.close()
 
@@ -228,12 +323,36 @@ class WeaviateResource(ConfigurableResource):
 
         Returns:
             True if collection was deleted, False if it didn't exist.
+
+        Raises:
+            WeaviateConnectionError: Cannot connect to Weaviate.
+            WeaviateCollectionError: Failed to delete collection.
         """
-        client = self.get_client()
+        try:
+            client = self.get_client()
+        except WeaviateConnectionError:
+            raise
+
         try:
             if client.collections.exists(name):
                 client.collections.delete(name)
                 return True
             return False
+        except WeaviateConnectionError:
+            raise
+        except Exception as e:
+            raise WeaviateCollectionError(f"Failed to delete collection {name}: {e}") from e
         finally:
             client.close()
+
+
+# =============================================================================
+# Exports
+# =============================================================================
+
+__all__ = [
+    "WeaviateResource",
+    "WeaviateError",
+    "WeaviateConnectionError",
+    "WeaviateCollectionError",
+]

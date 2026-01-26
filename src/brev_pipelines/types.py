@@ -532,6 +532,141 @@ class SpeechClassification(TypedDict):
     economic_outlook: int  # 1-5 scale: very_negative to very_positive
 
 
+# Classification scale mappings (shared between assets and validation)
+MONETARY_STANCE_SCALE: dict[str, int] = {
+    "very_dovish": 1,
+    "somewhat_dovish": 2,
+    "dovish": 2,  # Alias for somewhat_dovish
+    "neutral": 3,
+    "somewhat_hawkish": 4,
+    "hawkish": 4,  # Alias for somewhat_hawkish
+    "very_hawkish": 5,
+}
+
+TRADE_STANCE_SCALE: dict[str, int] = {
+    "very_protectionist": 1,
+    "somewhat_protectionist": 2,
+    "protectionist": 2,  # Alias for somewhat_protectionist
+    "neutral": 3,
+    "somewhat_globalist": 4,
+    "globalist": 4,  # Alias for somewhat_globalist
+    "very_globalist": 5,
+}
+
+OUTLOOK_SCALE: dict[str, int] = {
+    "very_negative": 1,
+    "somewhat_negative": 2,
+    "negative": 2,  # Alias for somewhat_negative
+    "neutral": 3,
+    "somewhat_positive": 4,
+    "positive": 4,  # Alias for somewhat_positive
+    "very_positive": 5,
+}
+
+
+# =============================================================================
+# LLM Observability Types
+# =============================================================================
+
+
+class LLMFailureBreakdown(TypedDict):
+    """Breakdown of LLM failures by error type.
+
+    Used for tracking failure statistics in Dagster asset metadata.
+
+    Attributes:
+        ValidationError: Count of validation failures (invalid JSON, missing fields).
+        LLMTimeoutError: Count of timeout failures.
+        LLMRateLimitError: Count of rate limit (429) failures.
+        LLMServerError: Count of server (5xx) failures.
+        unexpected_error: Count of unexpected/unclassified failures.
+    """
+
+    ValidationError: int
+    LLMTimeoutError: int
+    LLMRateLimitError: int
+    LLMServerError: int
+    unexpected_error: int
+
+
+class LLMAssetMetadata(TypedDict):
+    """Metadata for LLM-powered assets with failure tracking.
+
+    Used for Dagster asset metadata output via context.add_output_metadata().
+    Provides observability into LLM call success rates and failure patterns.
+
+    Attributes:
+        total_processed: Total number of records processed.
+        successful: Number of successful LLM calls.
+        failed: Number of failed LLM calls (using fallback).
+        success_rate: Percentage as formatted string (e.g., "95.0%").
+        failed_references: List of record IDs that failed (limited to 100).
+        failure_breakdown: Counts by error type.
+        avg_attempts: Average number of attempts per record.
+        total_duration_ms: Total processing time in milliseconds.
+    """
+
+    total_processed: int
+    successful: int
+    failed: int
+    success_rate: str
+    failed_references: list[str]
+    failure_breakdown: LLMFailureBreakdown
+    avg_attempts: float
+    total_duration_ms: int
+
+
+# =============================================================================
+# LLM Checkpoint Types
+# =============================================================================
+
+
+class CheckpointRecordBase(TypedDict, total=False):
+    """Base fields for all checkpoint records.
+
+    All checkpoint records must have a reference field for identification.
+    LLM status fields track processing results.
+    """
+
+    reference: str  # Required - unique record identifier
+    _llm_status: str  # 'success' or 'failed'
+    _llm_error: str | None  # Error message if failed
+    _llm_attempts: int  # Number of retry attempts
+    _llm_fallback_used: bool  # Whether fallback value was used
+
+
+class ClassificationCheckpointRecord(CheckpointRecordBase):
+    """Checkpoint record for classification LLM results.
+
+    Used by speech_classifications asset to checkpoint classification progress.
+    """
+
+    monetary_stance: int  # 1-5 scale
+    trade_stance: int  # 1-5 scale
+    tariff_mention: int  # 0 or 1
+    economic_outlook: int  # 1-5 scale
+
+
+class SummaryCheckpointRecord(CheckpointRecordBase):
+    """Checkpoint record for summary LLM results.
+
+    Used by speech_summaries asset to checkpoint summary progress.
+    """
+
+    summary: str  # Generated summary text
+
+
+class EmbeddingCheckpointRecord(TypedDict, total=False):
+    """Checkpoint record for embedding results.
+
+    Note: Does not extend CheckpointRecordBase since embeddings
+    don't go through LLM retry wrapper.
+    """
+
+    reference: str  # Required - unique record identifier
+    embedding: list[float]  # Embedding vector
+
+
 # =============================================================================
 # Type Aliases
 # =============================================================================

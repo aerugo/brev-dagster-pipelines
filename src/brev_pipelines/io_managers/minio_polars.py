@@ -13,6 +13,7 @@ import io
 
 import polars as pl
 from dagster import ConfigurableIOManager, InputContext, OutputContext
+from minio.error import S3Error
 from pydantic import Field
 
 # Import at runtime - Dagster ConfigurableIOManager needs actual type for validation
@@ -81,20 +82,28 @@ class MinIOPolarsIOManager(ConfigurableIOManager):
 
         Returns:
             Loaded Polars DataFrame.
+
+        Raises:
+            FileNotFoundError: If the object does not exist in MinIO.
+            RuntimeError: If MinIO returns an unexpected error.
         """
         # Determine input path from asset key
         asset_key = context.asset_key.path[-1] if context.asset_key else "input"
         path = f"{self.base_path}/{asset_key}.parquet"
 
-        # Download from MinIO
+        # Download from MinIO with error handling
         client = self.minio.get_client()
-        response = client.get_object(self.bucket, path)
-
         try:
-            data = response.read()
-        finally:
-            response.close()
-            response.release_conn()
+            response = client.get_object(self.bucket, path)
+            try:
+                data = response.read()
+            finally:
+                response.close()
+                response.release_conn()
+        except S3Error as e:
+            if e.code == "NoSuchKey":
+                raise FileNotFoundError(f"Object not found in MinIO: {self.bucket}/{path}") from e
+            raise RuntimeError(f"MinIO error loading {path}: {e}") from e
 
         # Parse Parquet to DataFrame
         df = pl.read_parquet(io.BytesIO(data))

@@ -24,6 +24,11 @@ import requests
 from dagster import ConfigurableResource
 from pydantic import Field
 
+from brev_pipelines.resources.safe_synth_retry import (
+    SafeSynthError,
+    SafeSynthJobFailedError,
+    SafeSynthTimeoutError,
+)
 from brev_pipelines.types import SafeSynthConfig, SafeSynthEvaluationResult, SafeSynthJobStatus
 
 if TYPE_CHECKING:
@@ -167,7 +172,9 @@ class SafeSynthesizerResource(ConfigurableResource):
                     pass
             time.sleep(10)
 
-        raise TimeoutError(f"{self.deployment_name} deployment not ready after {timeout} seconds")
+        raise SafeSynthTimeoutError(
+            f"{self.deployment_name} deployment not ready after {timeout} seconds"
+        )
 
     def create_synthesis_job(
         self,
@@ -296,8 +303,9 @@ class SafeSynthesizerResource(ConfigurableResource):
             Job status information.
 
         Raises:
-            TimeoutError: If job doesn't complete in max_wait_time.
-            RuntimeError: If job fails.
+            SafeSynthTimeoutError: If job doesn't complete in max_wait_time.
+            SafeSynthJobFailedError: If job fails.
+            SafeSynthError: If job not found or other errors.
         """
         from kubernetes.client.rest import ApiException
 
@@ -327,16 +335,18 @@ class SafeSynthesizerResource(ConfigurableResource):
                 if job.status.failed and job.status.failed > 0:
                     # Get pod logs for error details
                     error_msg = self._get_job_logs(job_name)
-                    raise RuntimeError(f"Job {job_name} failed: {error_msg}")
+                    raise SafeSynthJobFailedError(job_name, error_msg)
 
             except ApiException as e:
                 if e.status == 404:
-                    raise RuntimeError(f"Job {job_name} not found") from e
+                    raise SafeSynthError(f"Job {job_name} not found") from e
                 raise
 
             time.sleep(self.poll_interval)
 
-        raise TimeoutError(f"Job {job_name} did not complete in {self.max_wait_time} seconds")
+        raise SafeSynthTimeoutError(
+            f"Job {job_name} did not complete in {self.max_wait_time} seconds"
+        )
 
     def _get_job_logs(self, job_name: str) -> str:
         """Get logs from a job's pod."""
@@ -741,11 +751,15 @@ size {file_size}
 
             elif job_status in ("error", "cancelled"):
                 error_details = status.get("error_details", {})
-                raise RuntimeError(f"Job {job_id} failed with status {job_status}: {error_details}")
+                raise SafeSynthJobFailedError(
+                    job_id, f"Job failed with status {job_status}: {error_details}"
+                )
 
             time.sleep(self.poll_interval)
 
-        raise TimeoutError(f"Job {job_id} did not complete in {self.max_wait_time} seconds")
+        raise SafeSynthTimeoutError(
+            f"Job {job_id} did not complete in {self.max_wait_time} seconds"
+        )
 
     def health_check(self) -> bool:
         """Check if Safe Synthesizer service is healthy."""

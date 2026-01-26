@@ -532,6 +532,38 @@ class SpeechClassification(TypedDict):
     economic_outlook: int  # 1-5 scale: very_negative to very_positive
 
 
+# Classification scale mappings (shared between assets and validation)
+MONETARY_STANCE_SCALE: dict[str, int] = {
+    "very_dovish": 1,
+    "somewhat_dovish": 2,
+    "dovish": 2,  # Alias for somewhat_dovish
+    "neutral": 3,
+    "somewhat_hawkish": 4,
+    "hawkish": 4,  # Alias for somewhat_hawkish
+    "very_hawkish": 5,
+}
+
+TRADE_STANCE_SCALE: dict[str, int] = {
+    "very_protectionist": 1,
+    "somewhat_protectionist": 2,
+    "protectionist": 2,  # Alias for somewhat_protectionist
+    "neutral": 3,
+    "somewhat_globalist": 4,
+    "globalist": 4,  # Alias for somewhat_globalist
+    "very_globalist": 5,
+}
+
+OUTLOOK_SCALE: dict[str, int] = {
+    "very_negative": 1,
+    "somewhat_negative": 2,
+    "negative": 2,  # Alias for somewhat_negative
+    "neutral": 3,
+    "somewhat_positive": 4,
+    "positive": 4,  # Alias for somewhat_positive
+    "very_positive": 5,
+}
+
+
 # =============================================================================
 # Type Aliases
 # =============================================================================

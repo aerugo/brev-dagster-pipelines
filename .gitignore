@@ -43,6 +43,7 @@ htmlcov/
 # Dagster
 .dagster/
 dagster_home/
+.tmp_dagster_home*/
 
 # OS
 .DS_Store

@@ -88,9 +88,11 @@ SYNTHETIC_SCHEMA: list[WeaviatePropertyDef] = [
 @dg.asset(
     description="Load enriched speeches data product from LakeFS for synthesis",
     group_name="synthetic_speeches",
+    deps=["speeches_data_product"],  # Explicit dependency on speeches pipeline completion
     metadata={
         "layer": "input",
         "source": "lakefs",
+        "depends_on": "speeches_data_product",
     },
 )
 def enriched_data_for_synthesis(
@@ -100,9 +102,10 @@ def enriched_data_for_synthesis(
 ) -> pl.DataFrame:
     """Load enriched speeches data product from LakeFS.
 
-    This DECOUPLES the synthetic pipeline from the ETL pipeline,
-    allowing them to run independently. The ETL pipeline must complete
-    first and store data in LakeFS before running synthesis.
+    This asset has an explicit dependency on speeches_data_product to ensure
+    the speeches ETL pipeline completes before synthesis can begin. The data
+    is loaded from LakeFS rather than passed directly to avoid pickle
+    truncation issues with large intermediate data.
 
     Args:
         context: Dagster execution context for logging.

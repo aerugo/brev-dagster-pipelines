@@ -6,13 +6,14 @@ ETL Pipeline (speeches):
 - speeches_full_run: Process all records with GPT-OSS summaries
 - speeches_trial_run: Process only 10 records for testing
 
-Synthesis Pipeline (decoupled, loads from LakeFS):
+Synthesis Pipeline (depends on speeches pipeline completion):
 - synthetic_full_run: Generate synthetic data from enriched speeches
 - synthetic_trial_run: Synthesis trial run with 10 records
 
-Combined Pipelines:
-- full_pipeline_full_run: Complete pipeline (ETL + synthesis) all records
-- full_pipeline_trial_run: Complete pipeline with 10 records
+Note: The synthetic pipeline has an explicit dependency on speeches_data_product,
+so it cannot be run until the speeches pipeline has completed successfully.
+This prevents data consistency issues and pickle truncation errors that occurred
+when running both pipelines simultaneously.
 """
 
 from dagster import AssetSelection, define_asset_job
@@ -22,7 +23,6 @@ from brev_pipelines.config import TRIAL_RUN_CONFIG
 # Asset selections
 SPEECHES_ASSETS = AssetSelection.groups("central_bank_speeches")
 SYNTHETIC_ASSETS = AssetSelection.groups("synthetic_speeches")
-ALL_SPEECHES_ASSETS = SPEECHES_ASSETS | SYNTHETIC_ASSETS
 
 # =============================================================================
 # ETL Pipeline Jobs
@@ -85,49 +85,12 @@ synthetic_trial_run = define_asset_job(
     },
 )
 
-# =============================================================================
-# Combined Pipeline Jobs (ETL + Synthesis)
-# =============================================================================
-
-full_pipeline_full_run = define_asset_job(
-    name="full_pipeline_full_run",
-    description=(
-        "Complete pipeline: ETL + summaries followed by synthesis. "
-        "Processes all speeches and generates synthetic dataset."
-    ),
-    selection=ALL_SPEECHES_ASSETS,
-)
-
-full_pipeline_trial_run = define_asset_job(
-    name="full_pipeline_trial_run",
-    description=(
-        "Complete pipeline trial: ETL + synthesis with 10 records. "
-        "Uses separate collections/paths for testing."
-    ),
-    selection=ALL_SPEECHES_ASSETS,
-    config={
-        "ops": {
-            # ETL pipeline trial config
-            "raw_speeches": {"config": TRIAL_RUN_CONFIG},
-            "speeches_data_product": {"config": TRIAL_RUN_CONFIG},
-            "weaviate_index": {"config": TRIAL_RUN_CONFIG},
-            # Synthesis pipeline trial config
-            "enriched_data_for_synthesis": {"config": TRIAL_RUN_CONFIG},
-            "synthetic_data_product": {"config": TRIAL_RUN_CONFIG},
-            "synthetic_weaviate_index": {"config": TRIAL_RUN_CONFIG},
-        },
-    },
-)
-
 # Export all jobs
 all_jobs = [
     # ETL pipeline
     speeches_full_run,
     speeches_trial_run,
-    # Synthesis pipeline
+    # Synthesis pipeline (requires speeches pipeline to complete first)
     synthetic_full_run,
     synthetic_trial_run,
-    # Combined
-    full_pipeline_full_run,
-    full_pipeline_trial_run,
 ]

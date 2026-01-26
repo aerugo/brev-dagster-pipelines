@@ -146,11 +146,13 @@ class LakeFSResource(ConfigurableResource):  # type: ignore[type-arg]
         """
         try:
             client = self.get_client()
-            return client.objects_api.get_object(
+            # SDK returns bytearray, convert to bytes for consistent type
+            result = client.objects_api.get_object(
                 repository=repository,
                 ref=ref,
                 path=path,
             )
+            return bytes(result)
         except LakeFSConnectionError:
             raise
         except Exception as e:

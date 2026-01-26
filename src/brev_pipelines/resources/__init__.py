@@ -1,5 +1,6 @@
 """Dagster resources for Brev Data Platform."""
 
+from brev_pipelines.resources.k8s_scaler import K8sScalerResource
 from brev_pipelines.resources.lakefs import (
     LakeFSConnectionError,
     LakeFSError,
@@ -23,7 +24,6 @@ from brev_pipelines.resources.safe_synth_retry import (
     SafeSynthServerError,
     SafeSynthTimeoutError,
 )
-from brev_pipelines.resources.k8s_scaler import K8sScalerResource
 from brev_pipelines.resources.weaviate import (
     WeaviateCollectionError,
     WeaviateConnectionError,

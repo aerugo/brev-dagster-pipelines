@@ -26,7 +26,6 @@ from typing import TYPE_CHECKING
 
 from dagster import ConfigurableResource, get_dagster_logger
 from kubernetes import client, config
-from kubernetes.client.rest import ApiException
 from pydantic import Field
 
 if TYPE_CHECKING:

@@ -41,6 +41,15 @@ class NIMRateLimitError(NIMError):
 # =============================================================================
 
 
+class NIMServiceUnavailableError(NIMError):
+    """Raised when NIM service is unavailable and mock fallback should be used.
+
+    This error signals the retry wrapper to skip retries and use fallback immediately.
+    """
+
+    pass
+
+
 class NIMResource(ConfigurableResource):  # type: ignore[type-arg]
     """NVIDIA NIM LLM inference resource.
 
@@ -53,6 +62,32 @@ class NIMResource(ConfigurableResource):  # type: ignore[type-arg]
     timeout: int = Field(
         default=180, description="Request timeout in seconds (increase for large models)"
     )
+    use_mock_fallback: bool = Field(
+        default=True,
+        description="Skip retries and use fallback immediately if service unavailable (for local dev)",
+    )
+
+    # Cache health check result to avoid repeated calls
+    _health_check_cache: bool | None = None
+    _health_check_time: float = 0.0
+
+    def _is_service_available(self) -> bool:
+        """Check if service is available with caching.
+
+        Caches the result for 30 seconds to avoid repeated health checks.
+        """
+        import time
+
+        current_time = time.time()
+
+        # Return cached result if still valid (30 second TTL)
+        if self._health_check_cache is not None and current_time - self._health_check_time < 30:
+            return self._health_check_cache
+
+        # Perform health check
+        self._health_check_cache = self.health_check()
+        self._health_check_time = current_time
+        return self._health_check_cache
 
     def generate(
         self,
@@ -73,11 +108,19 @@ class NIMResource(ConfigurableResource):  # type: ignore[type-arg]
             Generated text.
 
         Raises:
+            NIMServiceUnavailableError: Service unavailable and mock fallback enabled.
             NIMTimeoutError: Request timed out.
             NIMServerError: Server returned 5xx error.
             NIMRateLimitError: Server returned 429 rate limit.
             NIMError: Other NIM-related errors.
         """
+        # Check service availability first if mock fallback enabled
+        if self.use_mock_fallback and not self._is_service_available():
+            raise NIMServiceUnavailableError(
+                f"NIM service at {self.endpoint} is unavailable. "
+                "Using fallback values (mock mode enabled)."
+            )
+
         effective_timeout = timeout_override or self.timeout
 
         try:
@@ -94,6 +137,14 @@ class NIMResource(ConfigurableResource):  # type: ignore[type-arg]
         except requests.exceptions.Timeout as e:
             raise NIMTimeoutError(f"NIM request timed out after {effective_timeout}s: {e}") from e
         except requests.exceptions.ConnectionError as e:
+            # If mock fallback enabled, convert connection error to service unavailable
+            if self.use_mock_fallback:
+                # Update cache to prevent further attempts
+                self._health_check_cache = False
+                self._health_check_time = __import__("time").time()
+                raise NIMServiceUnavailableError(
+                    f"NIM connection failed: {e}. Using fallback values."
+                ) from e
             raise NIMError(f"NIM connection failed: {e}") from e
         except requests.exceptions.RequestException as e:
             raise NIMError(f"NIM request failed: {e}") from e

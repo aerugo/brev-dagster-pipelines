@@ -39,6 +39,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from brev_pipelines.resources.nim import (
     NIMError,
+    NIMServiceUnavailableError,
 )
 from brev_pipelines.resources.nim import (
     NIMRateLimitError as NIMRateLimitException,
@@ -273,6 +274,17 @@ def retry_with_backoff(
                 attempts=attempt + 1,
                 duration_ms=duration_ms,
             )
+
+        except NIMServiceUnavailableError as e:
+            # Service unavailable with mock fallback enabled - skip retries
+            # This is expected in local dev mode, use fallback immediately
+            last_error = e
+            last_error_type = "NIMServiceUnavailableError"
+            if logger:
+                logger.info(
+                    f"NIM service unavailable for {record_id}, using fallback (mock mode)"
+                )
+            break  # Skip remaining retries
 
         except NIMTimeoutException as e:
             # Convert NIM timeout to our LLMTimeoutError

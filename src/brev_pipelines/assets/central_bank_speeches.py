@@ -283,8 +283,11 @@ def speech_embeddings(
     Uses llama-3_2-nemoretriever-300m-embed-v2 model (1024 dimensions).
     Returns tuple of (DataFrame, embeddings) for downstream storage.
 
-    Uses checkpointing to save progress every 32 rows, allowing recovery
-    from failures without reprocessing completed embeddings.
+    In production: Uses checkpointing to save progress every 32 rows,
+    allowing recovery from failures without reprocessing completed embeddings.
+
+    In local dev: Skips checkpointing when NIM service is unavailable and
+    mock embeddings are being used (they're instant and deterministic).
 
     Args:
         context: Dagster execution context for logging.
@@ -297,7 +300,34 @@ def speech_embeddings(
     """
     df = cleaned_speeches  # pl.DataFrame
 
-    # Create checkpoint manager for embeddings
+    # Check if NIM service is available (determines mock mode)
+    use_mock = nim_embedding.use_mock_fallback and not nim_embedding.health_check()
+
+    if use_mock:
+        # Mock mode: skip checkpointing, generate all embeddings directly
+        context.log.info(
+            f"Mock mode: generating {len(df)} embeddings without checkpointing"
+        )
+
+        # Prepare all texts
+        texts: list[str] = []
+        for row in df.iter_rows(named=True):
+            title = row.get("title", "") or ""
+            text = row.get("text", "") or ""
+            combined = f"{title}\n\n{text[:2000]}"
+            texts.append(combined)
+
+        # Generate all embeddings in one batch (mock is instant)
+        embeddings = nim_embedding.embed_texts(texts, batch_size=32)
+        context.log.info(
+            f"Generated {len(embeddings)} mock embeddings, dimension: {len(embeddings[0])}"
+        )
+
+        return (df, embeddings)
+
+    # Production mode: use checkpointing for recovery
+    context.log.info("Production mode: using checkpointing for embedding generation")
+
     checkpoint_mgr = LLMCheckpointManager(
         minio=minio,
         asset_name="speech_embeddings",
@@ -321,12 +351,14 @@ def speech_embeddings(
     # Process in batches with checkpointing
     batch_size = 32
     rows = to_process.to_dicts()
+    total_batches = (len(rows) + batch_size - 1) // batch_size
+    log_interval = max(1, total_batches // 10)  # Log ~10 times during processing
 
-    for i in range(0, len(rows), batch_size):
+    for batch_num, i in enumerate(range(0, len(rows), batch_size)):
         batch = rows[i : i + batch_size]
 
         # Prepare texts for this batch
-        texts: list[str] = []
+        texts = []
         for row in batch:
             title = row.get("title", "") or ""
             text = row.get("text", "") or ""
@@ -348,7 +380,11 @@ def speech_embeddings(
                 force=(j == len(batch) - 1),
             )  # Force save at end of batch
 
-        context.log.info(f"Checkpoint saved: {checkpoint_mgr.processed_count} embeddings complete")
+        # Log progress at intervals
+        if batch_num % log_interval == 0 or batch_num == total_batches - 1:
+            context.log.info(
+                f"Embedding progress: {checkpoint_mgr.processed_count}/{len(rows)} complete"
+            )
 
     # Finalize and get all results
     final_checkpoint = checkpoint_mgr.finalize()
@@ -1359,21 +1395,27 @@ def summaries_snapshot(
     config: PipelineConfig,
     speech_summaries: pl.DataFrame,
     lakefs: LakeFSResource,
+    classification_snapshot: dict[str, Any],  # Dependency to prevent concurrent commits
 ) -> dict[str, Any]:
     """Persist summary results to LakeFS for debugging and recovery.
 
     Stores the GPT-OSS generated summaries as a versioned snapshot.
     These summaries capture semantic nuance beyond numeric classifications.
 
+    Depends on classification_snapshot to ensure sequential LakeFS commits
+    (prevents "predicate failed" errors from concurrent commits).
+
     Args:
         context: Dagster execution context for logging.
         config: Pipeline configuration (is_trial for path selection).
         speech_summaries: DataFrame with summary column.
         lakefs: LakeFS resource for data versioning.
+        classification_snapshot: Previous snapshot (unused, forces sequential execution).
 
     Returns:
         Dictionary with storage metadata.
     """
+    del classification_snapshot  # Unused, exists only to enforce dependency
     from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
 
     df = speech_summaries
@@ -1479,6 +1521,7 @@ def embeddings_snapshot(
     config: PipelineConfig,
     speech_embeddings: tuple[pl.DataFrame, list[list[float]]],
     lakefs: LakeFSResource,
+    summaries_snapshot: dict[str, Any],  # Dependency to prevent concurrent commits
 ) -> dict[str, Any]:
     """Persist embeddings to LakeFS for debugging and recovery.
 
@@ -1486,15 +1529,20 @@ def embeddings_snapshot(
     embeddings are large (1024 floats per record), so this is primarily
     for recovery/debugging rather than routine access.
 
+    Depends on summaries_snapshot to ensure sequential LakeFS commits
+    (prevents "predicate failed" errors from concurrent commits).
+
     Args:
         context: Dagster execution context for logging.
         config: Pipeline configuration (is_trial for path selection).
         speech_embeddings: Tuple of (DataFrame, embeddings list).
         lakefs: LakeFS resource for data versioning.
+        summaries_snapshot: Previous snapshot (unused, forces sequential execution).
 
     Returns:
         Dictionary with storage metadata.
     """
+    del summaries_snapshot  # Unused, exists only to enforce dependency
     from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
 
     df, embeddings = speech_embeddings

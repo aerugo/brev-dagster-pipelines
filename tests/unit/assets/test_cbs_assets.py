@@ -689,11 +689,14 @@ class TestSummariesSnapshot:
         mock_lakefs_with_client: MagicMock,
     ) -> None:
         """Test summaries_snapshot counts non-null summaries."""
+        # Mock classification_snapshot dependency (just needs to be a dict)
+        mock_classification_snapshot: dict[str, object] = {"path": "test", "commit_id": "abc123"}
         result = summaries_snapshot(
             asset_context,
             pipeline_config,
             sample_summaries_df,
             mock_lakefs_with_client,
+            mock_classification_snapshot,
         )
 
         assert result["num_records"] == 3
@@ -740,11 +743,14 @@ class TestEmbeddingsSnapshot:
         mock_lakefs_with_client: MagicMock,
     ) -> None:
         """Test embeddings_snapshot stores embeddings with references."""
+        # Mock summaries_snapshot dependency (just needs to be a dict)
+        mock_summaries_snapshot: dict[str, object] = {"path": "test", "commit_id": "abc123"}
         result = embeddings_snapshot(
             asset_context,
             pipeline_config,
             sample_embeddings_tuple,
             mock_lakefs_with_client,
+            mock_summaries_snapshot,
         )
 
         assert result["num_records"] == 2
@@ -759,11 +765,14 @@ class TestEmbeddingsSnapshot:
         mock_lakefs_with_client: MagicMock,
     ) -> None:
         """Test embeddings_snapshot reports size in MB."""
+        # Mock summaries_snapshot dependency (just needs to be a dict)
+        mock_summaries_snapshot: dict[str, object] = {"path": "test", "commit_id": "abc123"}
         result = embeddings_snapshot(
             asset_context,
             pipeline_config,
             sample_embeddings_tuple,
             mock_lakefs_with_client,
+            mock_summaries_snapshot,
         )
 
         assert "size_mb" in result

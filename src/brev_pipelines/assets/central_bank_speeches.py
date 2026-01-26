@@ -32,7 +32,11 @@ import polars as pl
 
 from brev_pipelines.config import PipelineConfig
 from brev_pipelines.io_managers.checkpoint import LLMCheckpointManager, process_with_checkpoint
-from brev_pipelines.resources.lakefs import LakeFSResource
+from brev_pipelines.resources.lakefs import (
+    LakeFSConnectionError,
+    LakeFSError,
+    LakeFSResource,
+)
 from brev_pipelines.resources.llm_retry import (
     RetryConfig,
     retry_with_backoff,
@@ -42,7 +46,11 @@ from brev_pipelines.resources.llm_retry import (
 from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.nim import NIMResource
 from brev_pipelines.resources.nim_embedding import NIMEmbeddingResource
-from brev_pipelines.resources.weaviate import WeaviateResource
+from brev_pipelines.resources.weaviate import (
+    WeaviateCollectionError,
+    WeaviateConnectionError,
+    WeaviateResource,
+)
 from brev_pipelines.types import (
     LLMAssetMetadata,
     LLMFailureBreakdown,
@@ -146,19 +154,29 @@ def raw_speeches(
     df.write_parquet(buffer)
     parquet_bytes = buffer.getvalue()
 
-    # Get LakeFS client
-    lakefs_client = lakefs.get_client()
+    # Get LakeFS client with proper exception handling
+    try:
+        lakefs_client = lakefs.get_client()
+    except LakeFSConnectionError as e:
+        raise RuntimeError(
+            f"Cannot connect to LakeFS to store raw speeches. "
+            f"Ensure LakeFS is running and accessible. Details: {e}"
+        ) from e
 
     # Upload raw data to LakeFS
     path = "central-bank-speeches/raw_speeches.parquet"
-    lakefs_client.objects_api.upload_object(
-        repository="data",
-        branch="main",
-        path=path,
-        content=parquet_bytes,
-    )
+    try:
+        lakefs_client.objects_api.upload_object(
+            repository="data",
+            branch="main",
+            path=path,
+            content=parquet_bytes,
+        )
+    except LakeFSError as e:
+        raise RuntimeError(f"Failed to upload raw speeches to LakeFS: {e}") from e
 
     # Create commit for versioned raw data (skip if no changes)
+    # Note: Direct SDK calls raise standard exceptions, not LakeFSError
     try:
         commit = lakefs_client.commits_api.commit(
             repository="data",
@@ -1036,8 +1054,14 @@ def speeches_data_product(
     df.write_parquet(buffer)
     parquet_bytes = buffer.getvalue()
 
-    # Get LakeFS client
-    lakefs_client = lakefs.get_client()
+    # Get LakeFS client with proper exception handling
+    try:
+        lakefs_client = lakefs.get_client()
+    except LakeFSConnectionError as e:
+        raise RuntimeError(
+            f"Cannot connect to LakeFS to store speeches data product. "
+            f"Ensure LakeFS is running and accessible. Details: {e}"
+        ) from e
 
     # Upload to LakeFS - use trial path if is_trial
     if config.is_trial:
@@ -1045,14 +1069,19 @@ def speeches_data_product(
         context.log.info("TRIAL RUN: Using trial-specific LakeFS path")
     else:
         path = "central-bank-speeches/speeches.parquet"
-    lakefs_client.objects_api.upload_object(
-        repository="data",
-        branch="main",
-        path=path,
-        content=parquet_bytes,
-    )
+
+    try:
+        lakefs_client.objects_api.upload_object(
+            repository="data",
+            branch="main",
+            path=path,
+            content=parquet_bytes,
+        )
+    except LakeFSError as e:
+        raise RuntimeError(f"Failed to upload speeches data product to LakeFS: {e}") from e
 
     # Create commit (skip if no changes)
+    # Note: Direct SDK calls raise standard exceptions, not LakeFSError
     tariff_count = df.filter(pl.col("tariff_mention") == 1).height
     commit_id = None
     try:
@@ -1135,12 +1164,22 @@ def weaviate_index(
     else:
         collection_name = "CentralBankSpeeches"
 
-    # Ensure collection exists
-    weaviate.ensure_collection(
-        name=collection_name,
-        properties=SPEECHES_SCHEMA,
-        vector_dimensions=len(embeddings[0]),
-    )
+    # Ensure collection exists with proper exception handling
+    try:
+        weaviate.ensure_collection(
+            name=collection_name,
+            properties=SPEECHES_SCHEMA,
+            vector_dimensions=len(embeddings[0]),
+        )
+    except WeaviateConnectionError as e:
+        raise RuntimeError(
+            f"Cannot connect to Weaviate to create collection {collection_name}. "
+            f"Ensure Weaviate is running and accessible. Details: {e}"
+        ) from e
+    except WeaviateCollectionError as e:
+        raise RuntimeError(
+            f"Failed to create or verify Weaviate collection {collection_name}: {e}"
+        ) from e
 
     # Prepare objects for insertion
     objects: list[dict[str, Any]] = []
@@ -1162,11 +1201,21 @@ def weaviate_index(
         )
 
     # Insert objects with embeddings
-    count = weaviate.insert_objects(
-        collection_name=collection_name,
-        objects=objects,
-        vectors=embeddings,
-    )
+    try:
+        count = weaviate.insert_objects(
+            collection_name=collection_name,
+            objects=objects,
+            vectors=embeddings,
+        )
+    except WeaviateConnectionError as e:
+        raise RuntimeError(
+            f"Cannot connect to Weaviate to insert objects into {collection_name}. "
+            f"Ensure Weaviate is running and accessible. Details: {e}"
+        ) from e
+    except WeaviateCollectionError as e:
+        raise RuntimeError(
+            f"Failed to insert {len(objects)} objects into Weaviate collection {collection_name}: {e}"
+        ) from e
 
     context.log.info(f"Indexed {count} speeches in Weaviate collection: {collection_name}")
 
@@ -1233,8 +1282,14 @@ def classification_snapshot(
     df_snapshot.write_parquet(buffer)
     parquet_bytes = buffer.getvalue()
 
-    # Get LakeFS client
-    lakefs_client = lakefs.get_client()
+    # Get LakeFS client with proper exception handling
+    try:
+        lakefs_client = lakefs.get_client()
+    except LakeFSConnectionError as e:
+        raise RuntimeError(
+            f"Cannot connect to LakeFS to store classification snapshot. "
+            f"Ensure LakeFS is running and accessible. Details: {e}"
+        ) from e
 
     # Upload to LakeFS intermediate path
     if config.is_trial:
@@ -1242,14 +1297,18 @@ def classification_snapshot(
     else:
         path = "central-bank-speeches/intermediate/classifications.parquet"
 
-    lakefs_client.objects_api.upload_object(
-        repository="data",
-        branch="main",
-        path=path,
-        content=parquet_bytes,
-    )
+    try:
+        lakefs_client.objects_api.upload_object(
+            repository="data",
+            branch="main",
+            path=path,
+            content=parquet_bytes,
+        )
+    except LakeFSError as e:
+        raise RuntimeError(f"Failed to upload classification snapshot to LakeFS: {e}") from e
 
     # Create commit
+    # Note: Direct SDK calls raise standard exceptions, not LakeFSError
     commit_id = None
     try:
         tariff_count = df_snapshot.filter(pl.col("tariff_mention") == 1).height
@@ -1337,8 +1396,14 @@ def summaries_snapshot(
     df_snapshot.write_parquet(buffer)
     parquet_bytes = buffer.getvalue()
 
-    # Get LakeFS client
-    lakefs_client = lakefs.get_client()
+    # Get LakeFS client with proper exception handling
+    try:
+        lakefs_client = lakefs.get_client()
+    except LakeFSConnectionError as e:
+        raise RuntimeError(
+            f"Cannot connect to LakeFS to store summaries snapshot. "
+            f"Ensure LakeFS is running and accessible. Details: {e}"
+        ) from e
 
     # Upload to LakeFS intermediate path
     if config.is_trial:
@@ -1346,14 +1411,18 @@ def summaries_snapshot(
     else:
         path = "central-bank-speeches/intermediate/summaries.parquet"
 
-    lakefs_client.objects_api.upload_object(
-        repository="data",
-        branch="main",
-        path=path,
-        content=parquet_bytes,
-    )
+    try:
+        lakefs_client.objects_api.upload_object(
+            repository="data",
+            branch="main",
+            path=path,
+            content=parquet_bytes,
+        )
+    except LakeFSError as e:
+        raise RuntimeError(f"Failed to upload summaries snapshot to LakeFS: {e}") from e
 
     # Create commit
+    # Note: Direct SDK calls raise standard exceptions, not LakeFSError
     commit_id = None
     try:
         commit = lakefs_client.commits_api.commit(
@@ -1448,8 +1517,14 @@ def embeddings_snapshot(
     df_snapshot.write_parquet(buffer)
     parquet_bytes = buffer.getvalue()
 
-    # Get LakeFS client
-    lakefs_client = lakefs.get_client()
+    # Get LakeFS client with proper exception handling
+    try:
+        lakefs_client = lakefs.get_client()
+    except LakeFSConnectionError as e:
+        raise RuntimeError(
+            f"Cannot connect to LakeFS to store embeddings snapshot. "
+            f"Ensure LakeFS is running and accessible. Details: {e}"
+        ) from e
 
     # Upload to LakeFS intermediate path
     if config.is_trial:
@@ -1457,14 +1532,18 @@ def embeddings_snapshot(
     else:
         path = "central-bank-speeches/intermediate/embeddings.parquet"
 
-    lakefs_client.objects_api.upload_object(
-        repository="data",
-        branch="main",
-        path=path,
-        content=parquet_bytes,
-    )
+    try:
+        lakefs_client.objects_api.upload_object(
+            repository="data",
+            branch="main",
+            path=path,
+            content=parquet_bytes,
+        )
+    except LakeFSError as e:
+        raise RuntimeError(f"Failed to upload embeddings snapshot to LakeFS: {e}") from e
 
     # Create commit
+    # Note: Direct SDK calls raise standard exceptions, not LakeFSError
     commit_id = None
     try:
         commit = lakefs_client.commits_api.commit(

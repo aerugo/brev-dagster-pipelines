@@ -34,7 +34,12 @@ import polars as pl
 
 from brev_pipelines.config import PipelineConfig
 from brev_pipelines.io_managers.checkpoint import LLMCheckpointManager
-from brev_pipelines.resources.lakefs import LakeFSResource
+from brev_pipelines.resources.lakefs import (
+    LakeFSConnectionError,
+    LakeFSError,
+    LakeFSNotFoundError,
+    LakeFSResource,
+)
 from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.nim_embedding import NIMEmbeddingResource
 from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
@@ -42,7 +47,11 @@ from brev_pipelines.resources.safe_synth_retry import (
     SafeSynthRetryConfig,
     retry_safe_synth_call,
 )
-from brev_pipelines.resources.weaviate import WeaviateResource
+from brev_pipelines.resources.weaviate import (
+    WeaviateCollectionError,
+    WeaviateConnectionError,
+    WeaviateResource,
+)
 from brev_pipelines.types import SafeSynthConfig, WeaviatePropertyDef
 
 # Weaviate schema for synthetic speeches (summary-based, no full text)
@@ -103,8 +112,6 @@ def enriched_data_for_synthesis(
     Returns:
         DataFrame with enriched speeches including summaries.
     """
-    lakefs_client = lakefs.get_client()
-
     # Determine path based on trial mode
     if config.is_trial:
         path = "central-bank-speeches/trial/speeches.parquet"
@@ -114,12 +121,26 @@ def enriched_data_for_synthesis(
 
     context.log.info(f"Loading enriched speeches from lakefs://data/main/{path}")
 
-    # Download from LakeFS
-    response = lakefs_client.objects_api.get_object(
-        repository="data",
-        ref="main",
-        path=path,
-    )
+    # Download from LakeFS with proper exception handling
+    try:
+        lakefs_client = lakefs.get_client()
+        response = lakefs_client.objects_api.get_object(
+            repository="data",
+            ref="main",
+            path=path,
+        )
+    except LakeFSNotFoundError:
+        raise ValueError(
+            f"Enriched data not found at {path}. "
+            "Run the ETL pipeline first to generate enriched speeches with summaries."
+        ) from None
+    except LakeFSConnectionError as e:
+        raise RuntimeError(
+            f"Cannot connect to LakeFS. Ensure LakeFS is running and accessible. "
+            f"Details: {e}"
+        ) from e
+    except LakeFSError as e:
+        raise RuntimeError(f"Failed to load enriched data from LakeFS: {e}") from e
 
     # Load as DataFrame (response is bytes directly)
     df = pl.read_parquet(io.BytesIO(response))
@@ -488,33 +509,42 @@ def synthetic_validation_report(
         "html_report_available": html_report_bytes is not None,
     }
 
-    # Store in LakeFS
-    lakefs_client = lakefs.get_client()
+    # Store in LakeFS with proper exception handling
+    try:
+        lakefs_client = lakefs.get_client()
+    except LakeFSConnectionError as e:
+        raise RuntimeError(
+            f"Cannot connect to LakeFS to store validation report. "
+            f"Ensure LakeFS is running and accessible. Details: {e}"
+        ) from e
 
     # Upload JSON report
     report_path = "central-bank-speeches/synthetic/validation_report.json"
     report_bytes = json.dumps(report, indent=2).encode()
 
-    lakefs_client.objects_api.upload_object(
-        repository="data",
-        branch="main",
-        path=report_path,
-        content=report_bytes,
-    )
-    context.log.info(f"Stored validation report to lakefs://data/main/{report_path}")
-
-    # Upload HTML evaluation report if available
-    html_report_path = "central-bank-speeches/synthetic/evaluation_report.html"
-    if html_report_bytes:
+    try:
         lakefs_client.objects_api.upload_object(
             repository="data",
             branch="main",
-            path=html_report_path,
-            content=html_report_bytes,
+            path=report_path,
+            content=report_bytes,
         )
-        context.log.info(f"Stored HTML evaluation report to lakefs://data/main/{html_report_path}")
-    else:
-        context.log.warning("HTML evaluation report not available from Safe Synthesizer")
+        context.log.info(f"Stored validation report to lakefs://data/main/{report_path}")
+
+        # Upload HTML evaluation report if available
+        html_report_path = "central-bank-speeches/synthetic/evaluation_report.html"
+        if html_report_bytes:
+            lakefs_client.objects_api.upload_object(
+                repository="data",
+                branch="main",
+                path=html_report_path,
+                content=html_report_bytes,
+            )
+            context.log.info(f"Stored HTML evaluation report to lakefs://data/main/{html_report_path}")
+        else:
+            context.log.warning("HTML evaluation report not available from Safe Synthesizer")
+    except LakeFSError as e:
+        raise RuntimeError(f"Failed to upload validation report to LakeFS: {e}") from e
 
     # Commit (skip if no changes)
     try:
@@ -700,20 +730,31 @@ def synthetic_data_product(
     parquet_bytes = buffer.getvalue()
 
     # Store in LakeFS - use trial path if is_trial
-    lakefs_client = lakefs.get_client()
+    try:
+        lakefs_client = lakefs.get_client()
+    except LakeFSConnectionError as e:
+        raise RuntimeError(
+            f"Cannot connect to LakeFS to store synthetic data product. "
+            f"Ensure LakeFS is running and accessible. Details: {e}"
+        ) from e
+
     if config.is_trial:
         path = "central-bank-speeches/synthetic/trial/speeches.parquet"
         context.log.info("TRIAL RUN: Using trial-specific LakeFS path for synthetic data")
     else:
         path = "central-bank-speeches/synthetic/speeches.parquet"
 
-    lakefs_client.objects_api.upload_object(
-        repository="data",
-        branch="main",
-        path=path,
-        content=parquet_bytes,
-    )
+    try:
+        lakefs_client.objects_api.upload_object(
+            repository="data",
+            branch="main",
+            path=path,
+            content=parquet_bytes,
+        )
+    except LakeFSError as e:
+        raise RuntimeError(f"Failed to upload synthetic data product to LakeFS: {e}") from e
 
+    # Note: Direct SDK calls raise standard exceptions, not LakeFSError
     commit_id = None
     try:
         commit = lakefs_client.commits_api.commit(
@@ -786,11 +827,21 @@ def synthetic_weaviate_index(
         collection_name = "SyntheticSpeeches"
 
     # Ensure collection exists with updated schema
-    weaviate.ensure_collection(
-        name=collection_name,
-        properties=SYNTHETIC_SCHEMA,
-        vector_dimensions=len(embeddings[0]),
-    )
+    try:
+        weaviate.ensure_collection(
+            name=collection_name,
+            properties=SYNTHETIC_SCHEMA,
+            vector_dimensions=len(embeddings[0]),
+        )
+    except WeaviateConnectionError as e:
+        raise RuntimeError(
+            f"Cannot connect to Weaviate to create collection {collection_name}. "
+            f"Ensure Weaviate is running and accessible. Details: {e}"
+        ) from e
+    except WeaviateCollectionError as e:
+        raise RuntimeError(
+            f"Failed to create or verify Weaviate collection {collection_name}: {e}"
+        ) from e
 
     # Prepare objects with all fields (no full text, only summary)
     objects: list[dict[str, Any]] = []
@@ -813,11 +864,21 @@ def synthetic_weaviate_index(
         )
 
     # Insert objects with embeddings
-    count = weaviate.insert_objects(
-        collection_name=collection_name,
-        objects=objects,
-        vectors=embeddings,
-    )
+    try:
+        count = weaviate.insert_objects(
+            collection_name=collection_name,
+            objects=objects,
+            vectors=embeddings,
+        )
+    except WeaviateConnectionError as e:
+        raise RuntimeError(
+            f"Cannot connect to Weaviate to insert objects into {collection_name}. "
+            f"Ensure Weaviate is running and accessible. Details: {e}"
+        ) from e
+    except WeaviateCollectionError as e:
+        raise RuntimeError(
+            f"Failed to insert {len(objects)} objects into Weaviate collection {collection_name}: {e}"
+        ) from e
 
     context.log.info(
         f"Indexed {count} synthetic summaries in Weaviate collection: {collection_name}"
@@ -871,8 +932,14 @@ def synthetic_summaries_snapshot(
     df.write_parquet(buffer)
     parquet_bytes = buffer.getvalue()
 
-    # Get LakeFS client
-    lakefs_client = lakefs.get_client()
+    # Get LakeFS client with proper exception handling
+    try:
+        lakefs_client = lakefs.get_client()
+    except LakeFSConnectionError as e:
+        raise RuntimeError(
+            f"Cannot connect to LakeFS to store synthetic summaries snapshot. "
+            f"Ensure LakeFS is running and accessible. Details: {e}"
+        ) from e
 
     # Upload to LakeFS intermediate path
     if config.is_trial:
@@ -880,14 +947,18 @@ def synthetic_summaries_snapshot(
     else:
         path = "synthetic-speeches/intermediate/summaries.parquet"
 
-    lakefs_client.objects_api.upload_object(
-        repository="data",
-        branch="main",
-        path=path,
-        content=parquet_bytes,
-    )
+    try:
+        lakefs_client.objects_api.upload_object(
+            repository="data",
+            branch="main",
+            path=path,
+            content=parquet_bytes,
+        )
+    except LakeFSError as e:
+        raise RuntimeError(f"Failed to upload synthetic summaries snapshot to LakeFS: {e}") from e
 
     # Create commit
+    # Note: Direct SDK calls raise standard exceptions, not LakeFSError
     commit_id = None
     try:
         commit = lakefs_client.commits_api.commit(
@@ -969,8 +1040,14 @@ def synthetic_embeddings_snapshot(
     df_snapshot.write_parquet(buffer)
     parquet_bytes = buffer.getvalue()
 
-    # Get LakeFS client
-    lakefs_client = lakefs.get_client()
+    # Get LakeFS client with proper exception handling
+    try:
+        lakefs_client = lakefs.get_client()
+    except LakeFSConnectionError as e:
+        raise RuntimeError(
+            f"Cannot connect to LakeFS to store synthetic embeddings snapshot. "
+            f"Ensure LakeFS is running and accessible. Details: {e}"
+        ) from e
 
     # Upload to LakeFS intermediate path
     if config.is_trial:
@@ -978,14 +1055,18 @@ def synthetic_embeddings_snapshot(
     else:
         path = "synthetic-speeches/intermediate/embeddings.parquet"
 
-    lakefs_client.objects_api.upload_object(
-        repository="data",
-        branch="main",
-        path=path,
-        content=parquet_bytes,
-    )
+    try:
+        lakefs_client.objects_api.upload_object(
+            repository="data",
+            branch="main",
+            path=path,
+            content=parquet_bytes,
+        )
+    except LakeFSError as e:
+        raise RuntimeError(f"Failed to upload synthetic embeddings snapshot to LakeFS: {e}") from e
 
     # Create commit
+    # Note: Direct SDK calls raise standard exceptions, not LakeFSError
     commit_id = None
     try:
         commit = lakefs_client.commits_api.commit(

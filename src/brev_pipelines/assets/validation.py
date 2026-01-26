@@ -18,10 +18,10 @@ from typing import Any
 
 import dagster as dg
 
-from brev_pipelines.resources.lakefs import LakeFSResource
+from brev_pipelines.resources.lakefs import LakeFSConnectionError, LakeFSResource
 from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.nim import NIMResource
-from brev_pipelines.resources.weaviate import WeaviateResource
+from brev_pipelines.resources.weaviate import WeaviateConnectionError, WeaviateResource
 
 
 @dataclass
@@ -213,6 +213,12 @@ def validate_lakefs(
             result.tests.append({"name": "connection", "passed": health})
             if not health:
                 result.passed = False
+        except LakeFSConnectionError as e:
+            result.tests.append(
+                {"name": "connection", "passed": False, "error": str(e), "error_type": "connection"}
+            )
+            result.passed = False
+            raise
         except Exception as e:
             result.tests.append({"name": "connection", "passed": False, "error": str(e)})
             result.passed = False
@@ -230,6 +236,11 @@ def validate_lakefs(
                     "repositories": repos,
                 }
             )
+        except LakeFSConnectionError as e:
+            result.tests.append(
+                {"name": "list_repositories", "passed": False, "error": str(e), "error_type": "connection"}
+            )
+            result.passed = False
         except Exception as e:
             result.tests.append({"name": "list_repositories", "passed": False, "error": str(e)})
             result.passed = False
@@ -246,6 +257,11 @@ def validate_lakefs(
                     "endpoint": lakefs.endpoint,
                 }
             )
+        except LakeFSConnectionError as e:
+            result.tests.append(
+                {"name": "api_version", "passed": False, "error": str(e), "error_type": "connection"}
+            )
+            # Not a critical failure
         except Exception as e:
             result.tests.append({"name": "api_version", "passed": False, "error": str(e)})
             # Not a critical failure
@@ -389,6 +405,14 @@ def validate_weaviate(
                 result.error = "Weaviate not ready"
                 result.duration_ms = (time.time() - start) * 1000
                 return result.to_dict()
+        except WeaviateConnectionError as e:
+            result.tests.append(
+                {"name": "connection", "passed": False, "error": str(e), "error_type": "connection"}
+            )
+            result.passed = False
+            result.error = str(e)
+            result.duration_ms = (time.time() - start) * 1000
+            return result.to_dict()
         except Exception as e:
             result.tests.append({"name": "connection", "passed": False, "error": str(e)})
             result.passed = False
@@ -565,6 +589,8 @@ def quick_health_check(
     try:
         health = lakefs.health_check()
         results["lakefs"] = {"status": "healthy" if health else "unhealthy", "error": None}
+    except LakeFSConnectionError as e:
+        results["lakefs"] = {"status": "unhealthy", "error": str(e)[:100], "error_type": "connection"}
     except Exception as e:
         results["lakefs"] = {"status": "unhealthy", "error": str(e)[:100]}
 
@@ -580,6 +606,8 @@ def quick_health_check(
         weaviate_client = weaviate.get_client()
         is_ready = weaviate_client.is_ready()
         results["weaviate"] = {"status": "healthy" if is_ready else "unhealthy", "error": None}
+    except WeaviateConnectionError as e:
+        results["weaviate"] = {"status": "unhealthy", "error": str(e)[:100], "error_type": "connection"}
     except Exception as e:
         results["weaviate"] = {"status": "unhealthy", "error": str(e)[:100]}
 

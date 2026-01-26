@@ -255,33 +255,67 @@ def process_with_checkpoint(
     if logger:
         logger.info(f"Processing {total_remaining} rows")
 
-    # Process in batches with progress tracking
+    # Process in batches with progress and failure tracking
     rows = to_process.to_dicts()
     batch_results: list[dict[str, Any]] = []
     processed_count = 0
+    success_count = 0
+    failure_count = 0
     last_log_count = 0
+    recent_errors: list[str] = []  # Track last few errors for summary
 
     for row in rows:
         result = process_fn(row)
         batch_results.append(result)
         processed_count += 1
 
+        # Track success/failure based on _llm_status column
+        status = result.get("_llm_status", "success")
+        if status == "failed":
+            failure_count += 1
+            error_msg = result.get("_llm_error", "Unknown error")
+            record_id = result.get("reference", result.get("id", "unknown"))
+            # Keep last 5 unique errors for summary
+            error_summary = f"{record_id}: {error_msg[:100]}"
+            if error_summary not in recent_errors:
+                recent_errors.append(error_summary)
+                if len(recent_errors) > 5:
+                    recent_errors.pop(0)
+            # Log individual failures with warning level
+            if logger:
+                logger.warning(f"LLM call failed for {record_id}: {error_msg[:200]}")
+        else:
+            success_count += 1
+
         # Save checkpoint at batch boundaries
         if len(batch_results) >= batch_size:
             checkpoint_manager.save_batch(batch_results, force=True)
             batch_results = []
 
-        # Log progress at intervals
+        # Log progress at intervals (including failure rate)
         if logger and processed_count - last_log_count >= progress_log_interval:
             pct = (processed_count / total_remaining) * 100
-            logger.info(f"Progress: {processed_count}/{total_remaining} ({pct:.0f}%)")
+            fail_rate = (failure_count / processed_count * 100) if processed_count > 0 else 0
+            logger.info(
+                f"Progress: {processed_count}/{total_remaining} ({pct:.0f}%) - "
+                f"Success: {success_count}, Failed: {failure_count} ({fail_rate:.1f}%)"
+            )
             last_log_count = processed_count
 
     # Save any remaining results
     if batch_results:
         checkpoint_manager.save_batch(batch_results, force=True)
 
+    # Log final summary with failure details
     if logger:
-        logger.info(f"Completed: {processed_count}/{total_remaining} rows processed")
+        fail_rate = (failure_count / processed_count * 100) if processed_count > 0 else 0
+        logger.info(
+            f"Completed: {processed_count}/{total_remaining} rows - "
+            f"Success: {success_count}, Failed: {failure_count} ({fail_rate:.1f}%)"
+        )
+        if failure_count > 0:
+            logger.warning(f"LLM failures detected: {failure_count} rows failed")
+            if recent_errors:
+                logger.warning("Recent errors:\n  " + "\n  ".join(recent_errors))
 
     return checkpoint_manager.finalize()

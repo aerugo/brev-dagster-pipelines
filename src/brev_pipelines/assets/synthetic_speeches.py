@@ -38,6 +38,10 @@ from brev_pipelines.resources.lakefs import LakeFSResource
 from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.nim_embedding import NIMEmbeddingResource
 from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
+from brev_pipelines.resources.safe_synth_retry import (
+    SafeSynthRetryConfig,
+    retry_safe_synth_call,
+)
 from brev_pipelines.resources.weaviate import WeaviateResource
 from brev_pipelines.types import SafeSynthConfig, WeaviatePropertyDef
 
@@ -136,9 +140,94 @@ def enriched_data_for_synthesis(
             "Run the ETL pipeline first to generate summaries and classifications."
         )
 
+    # Validate dead letter columns if present
+    _validate_input_data_quality(df, context)
+
     context.log.info(f"Loaded columns: {df.columns}")
 
     return df
+
+
+def _validate_input_data_quality(
+    df: pl.DataFrame,
+    context: dg.AssetExecutionContext,
+) -> None:
+    """Validate input data quality by checking dead letter columns.
+
+    Logs warnings when failed records are detected. Does NOT filter
+    records - the synthesis will process all records including those
+    with fallback values.
+
+    Args:
+        df: Input DataFrame to validate.
+        context: Dagster context for logging.
+    """
+    total_records = len(df)
+
+    # Check classification dead letter columns
+    class_status_col = "_llm_status_class"
+    summary_status_col = "_llm_status_summary"
+
+    failed_classification = 0
+    failed_summary = 0
+
+    if class_status_col in df.columns:
+        failed_classification = df.filter(pl.col(class_status_col) == "failed").height
+        if failed_classification > 0:
+            context.log.warning(
+                f"Input data contains {failed_classification} records with failed "
+                f"classification ({100 * failed_classification / total_records:.1f}%). "
+                "These records use fallback values."
+            )
+
+    if summary_status_col in df.columns:
+        failed_summary = df.filter(pl.col(summary_status_col) == "failed").height
+        if failed_summary > 0:
+            context.log.warning(
+                f"Input data contains {failed_summary} records with failed "
+                f"summaries ({100 * failed_summary / total_records:.1f}%). "
+                "These records use fallback values."
+            )
+
+    # Calculate total unique failed records
+    if class_status_col in df.columns or summary_status_col in df.columns:
+        # Build filter for any failure
+        failure_conditions = []
+        if class_status_col in df.columns:
+            failure_conditions.append(pl.col(class_status_col) == "failed")
+        if summary_status_col in df.columns:
+            failure_conditions.append(pl.col(summary_status_col) == "failed")
+
+        if failure_conditions:
+            combined_filter = failure_conditions[0]
+            for cond in failure_conditions[1:]:
+                combined_filter = combined_filter | cond
+
+            total_failed = df.filter(combined_filter).height
+
+            if total_failed > 0:
+                failure_rate = 100 * total_failed / total_records
+                context.log.info(
+                    f"Input data quality: {total_failed}/{total_records} records "
+                    f"({failure_rate:.1f}%) have at least one LLM failure"
+                )
+
+                # Warn if failure rate is high (>10%)
+                if failure_rate > 10:
+                    context.log.warning(
+                        f"High failure rate ({failure_rate:.1f}%) in input data. "
+                        "Consider reprocessing failed records before synthesis."
+                    )
+            else:
+                context.log.info(
+                    f"Input data quality: All {total_records} records have "
+                    "successful LLM results"
+                )
+    else:
+        context.log.info(
+            "Input data does not contain dead letter columns "
+            "(legacy data or pre-retry pattern)"
+        )
 
 
 @dg.asset(
@@ -280,11 +369,25 @@ def synthetic_summaries(
             f"Dataset has {num_records} records (<500) - disabling holdout for synthesis"
         )
 
-    # Single synthesis call with ALL data
-    synthetic_data, evaluation = safe_synth.synthesize(
-        input_data=data_for_synthesis,
+    # Single synthesis call with ALL data - wrapped with retry logic
+    context.log.info("Starting Safe Synthesizer with retry support...")
+
+    def do_synthesis() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        return safe_synth.synthesize(
+            input_data=data_for_synthesis,
+            run_id=run_id,
+            config=synth_config,
+        )
+
+    synthetic_data, evaluation = retry_safe_synth_call(
+        do_synthesis,
         run_id=run_id,
-        config=synth_config,
+        config=SafeSynthRetryConfig(
+            max_retries=3,
+            initial_delay=30.0,  # Safe Synth jobs are slow to recover
+            max_delay=300.0,  # Max 5 minutes between retries
+        ),
+        logger=context.log,
     )
 
     # Convert to DataFrame

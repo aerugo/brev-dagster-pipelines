@@ -822,12 +822,23 @@ class TestSpeechEmbeddings:
         resource.embed_text = MagicMock(return_value=[0.1] * 1024)
         return resource
 
+    @pytest.fixture
+    def mock_k8s_scaler(self) -> MagicMock:
+        """Create mock K8s scaler resource."""
+        resource = MagicMock()
+        # Mock temporarily_scale as a context manager that does nothing
+        resource.temporarily_scale = MagicMock(
+            return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+        )
+        return resource
+
     def test_generates_embeddings_for_all_rows(
         self,
         asset_context: AssetExecutionContext,
         sample_cleaned_df: pl.DataFrame,
         mock_nim_embedding: MagicMock,
         mock_minio_for_checkpoint: MagicMock,
+        mock_k8s_scaler: MagicMock,
     ) -> None:
         """Test speech_embeddings generates embeddings for all rows."""
 
@@ -857,6 +868,7 @@ class TestSpeechEmbeddings:
                 sample_cleaned_df,
                 mock_nim_embedding,
                 mock_minio_for_checkpoint,
+                mock_k8s_scaler,
             )
 
         assert len(embeddings) == 2

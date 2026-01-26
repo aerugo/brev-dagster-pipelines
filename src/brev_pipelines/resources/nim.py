@@ -5,7 +5,7 @@ from dagster import ConfigurableResource
 from pydantic import Field
 
 
-class NIMResource(ConfigurableResource):
+class NIMResource(ConfigurableResource):  # type: ignore[type-arg]
     """NVIDIA NIM LLM inference resource.
 
     Supports both small models (Llama 8B) and large models (GPT-OSS 120B).
@@ -14,7 +14,9 @@ class NIMResource(ConfigurableResource):
 
     endpoint: str = Field(description="NIM endpoint URL")
     model: str = Field(default="meta/llama-3.1-8b-instruct", description="Model name")
-    timeout: int = Field(default=180, description="Request timeout in seconds (increase for large models)")
+    timeout: int = Field(
+        default=180, description="Request timeout in seconds (increase for large models)"
+    )
 
     def generate(
         self,
@@ -46,7 +48,9 @@ class NIMResource(ConfigurableResource):
                 timeout=timeout_override or self.timeout,
             )
             response.raise_for_status()
-            return response.json()["choices"][0]["message"]["content"].strip()
+            data = response.json()
+            content: str = data["choices"][0]["message"]["content"]
+            return content.strip()
         except requests.exceptions.Timeout:
             return f"LLM error: Request timed out after {timeout_override or self.timeout}s"
         except Exception as e:

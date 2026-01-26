@@ -14,6 +14,8 @@ from pydantic import Field
 from weaviate.classes.config import Configure, DataType, Property
 from weaviate.classes.query import MetadataQuery
 
+from brev_pipelines.types import WeaviatePropertyDef, WeaviateSearchResult
+
 if TYPE_CHECKING:
     from weaviate import WeaviateClient
 
@@ -61,8 +63,8 @@ class WeaviateResource(ConfigurableResource):
     def ensure_collection(
         self,
         name: str,
-        properties: list[dict[str, Any]],
-        vector_dimensions: int = 1024,
+        properties: list[WeaviatePropertyDef],
+        vector_dimensions: int = 1024,  # noqa: ARG002
     ) -> None:
         """Ensure a collection exists with the given schema.
 
@@ -70,8 +72,8 @@ class WeaviateResource(ConfigurableResource):
 
         Args:
             name: Collection name (PascalCase recommended).
-            properties: List of property definitions with 'name' and optional 'type', 'description'.
-            vector_dimensions: Dimension of vectors to store (default 1024).
+            properties: List of WeaviatePropertyDef with 'name' and optional 'type', 'description'.
+            vector_dimensions: Dimension of vectors to store (reserved for future use).
         """
         client = self.get_client()
         try:
@@ -79,7 +81,7 @@ class WeaviateResource(ConfigurableResource):
                 return
 
             # Build property definitions
-            props = []
+            props: list[Property] = []
             for prop in properties:
                 data_type = DataType.TEXT
                 prop_type = prop.get("type", "text")
@@ -114,7 +116,7 @@ class WeaviateResource(ConfigurableResource):
         collection_name: str,
         objects: list[dict[str, Any]],
         vectors: list[list[float]],
-        batch_size: int = 100,
+        batch_size: int = 100,  # noqa: ARG002
     ) -> int:
         """Insert objects with their vectors into a collection.
 
@@ -122,7 +124,7 @@ class WeaviateResource(ConfigurableResource):
             collection_name: Target collection name.
             objects: List of property dictionaries.
             vectors: Corresponding embedding vectors.
-            batch_size: Objects per batch insert (not currently used, reserved for future).
+            batch_size: Objects per batch insert (reserved for future use).
 
         Returns:
             Number of objects inserted.
@@ -139,7 +141,7 @@ class WeaviateResource(ConfigurableResource):
             collection = client.collections.get(collection_name)
 
             with collection.batch.dynamic() as batch:
-                for obj, vector in zip(objects, vectors):
+                for obj, vector in zip(objects, vectors, strict=True):
                     batch.add_object(properties=obj, vector=vector)
 
             return len(objects)
@@ -151,18 +153,18 @@ class WeaviateResource(ConfigurableResource):
         collection_name: str,
         query_vector: list[float],
         limit: int = 10,
-        return_properties: list[str] | None = None,
-    ) -> list[dict[str, Any]]:
+        return_properties: list[str] | None = None,  # noqa: ARG002
+    ) -> list[WeaviateSearchResult]:
         """Perform vector similarity search.
 
         Args:
             collection_name: Collection to search.
             query_vector: Query embedding vector.
             limit: Maximum results to return.
-            return_properties: Properties to include in results (currently not filtered).
+            return_properties: Properties to include in results (reserved for future use).
 
         Returns:
-            List of matching objects with '_distance' and '_certainty' metadata.
+            List of WeaviateSearchResult with properties, _distance, and _certainty.
         """
         client = self.get_client()
         try:
@@ -174,12 +176,14 @@ class WeaviateResource(ConfigurableResource):
                 return_metadata=MetadataQuery(distance=True, certainty=True),
             )
 
-            output = []
+            output: list[WeaviateSearchResult] = []
             for obj in results.objects:
-                item = dict(obj.properties)
-                item["_distance"] = obj.metadata.distance
-                item["_certainty"] = obj.metadata.certainty
-                output.append(item)
+                result: WeaviateSearchResult = {
+                    "properties": dict(obj.properties),  # type: ignore[arg-type]
+                    "_distance": obj.metadata.distance or 0.0,
+                    "_certainty": obj.metadata.certainty or 0.0,
+                }
+                output.append(result)
 
             return output
         finally:

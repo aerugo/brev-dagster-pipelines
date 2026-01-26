@@ -24,12 +24,20 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    # Testing
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "pytest-mock>=3.10.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-ruff>=0.4.0",  # Run ruff during pytest
+    # Linting & Type Checking
     "ruff>=0.1.0",
     "mypy>=1.0.0",
-    "dagster-webserver>=1.6.0",
+    "pyright>=1.1.0",
+    # Type stubs
     "types-requests>=2.31.0",
+    # Development tools
+    "dagster-webserver>=1.6.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -40,9 +48,93 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "W"]
-ignore = ["E501"]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "ARG",    # flake8-unused-arguments
+    "SIM",    # flake8-simplify
+    "TCH",    # flake8-type-checking
+    "ANN",    # flake8-annotations
+    "D",      # pydocstyle
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "ANN401", # dynamically typed expressions (Any) - will fix in Phase 3-5
+    "D100",   # missing docstring in public module
+    "D104",   # missing docstring in public package
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "ANN",    # annotations not required in tests
+    "D",      # docstrings not required in tests
+    "ARG",    # unused arguments OK in tests (fixtures)
+    "TCH",    # type-checking imports at runtime OK in tests
+]
+# Dagster I/O managers and resources require runtime imports (not TYPE_CHECKING)
+"src/brev_pipelines/io_managers/*.py" = ["TC001"]
+"src/brev_pipelines/resources/*.py" = ["TC001"]
 
 [tool.mypy]
 python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+# Temporary: ignore missing imports until we add all stubs
 ignore_missing_imports = true
+# Per-module overrides for gradual strictness adoption
+# These will be removed as we fix violations in each phase
+
+[[tool.mypy.overrides]]
+module = [
+    "brev_pipelines.resources.safe_synth",
+    "brev_pipelines.resources.weaviate",
+    "brev_pipelines.io_managers.checkpoint",
+    "brev_pipelines.assets.validation",
+    "brev_pipelines.assets.central_bank_speeches",
+    "brev_pipelines.assets.synthetic_speeches",
+    "brev_pipelines.assets.demo",
+]
+# Temporarily allow Any until Phase 3-5 fixes
+disallow_any_generics = false
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+reportMissingImports = false
+reportMissingTypeStubs = false
+# Third-party libraries (polars, pandas, lakefs-sdk, kubernetes, weaviate, dagster)
+# have incomplete type stubs - suppress these unfixable warnings
+reportUnknownMemberType = false
+reportUnknownArgumentType = false
+reportUnknownVariableType = false
+reportUnknownParameterType = false
+# Dagster decorators don't preserve function types
+reportUntypedFunctionDecorator = false
+# Defensive None checks and polars type comparisons are intentional
+reportUnnecessaryComparison = false
+reportUnnecessaryContains = false
+# Dagster ConfigurableResource and other third-party generics
+reportMissingTypeArgument = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "src"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short --ruff --ruff-format"
+
+[tool.pytest_asyncio]
+asyncio_mode = "auto"
+# Coverage will be enabled after test infrastructure is complete
+# addopts = "-v --tb=short --cov=brev_pipelines --cov-report=term-missing"

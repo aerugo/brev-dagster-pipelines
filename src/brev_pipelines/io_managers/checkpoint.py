@@ -23,13 +23,19 @@ Usage:
 
 from __future__ import annotations
 
+import contextlib
 import io
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from brev_pipelines.resources.minio import MinIOResource
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from dagster import DagsterLogManager
 
 
 class LLMCheckpointManager(BaseModel):
@@ -46,24 +52,21 @@ class LLMCheckpointManager(BaseModel):
         checkpoint_interval: Number of rows between checkpoint saves.
     """
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     minio: MinIOResource
     asset_name: str
     run_id: str
     bucket: str = Field(default="dagster-checkpoints")
     checkpoint_interval: int = Field(default=10)
 
-    # Internal state
-    _accumulated_results: list = []
-    _total_saved: int = 0
+    # Internal state (private attributes in Pydantic v2)
+    _accumulated_results: list[dict[str, Any]] = PrivateAttr(default_factory=list)
+    _total_saved: int = PrivateAttr(default=0)
 
-    class Config:
-        arbitrary_types_allowed = True
-        underscore_attrs_are_private = True
-
-    def __init__(self, **data):
+    def __init__(self, **data: Any) -> None:
+        """Initialize checkpoint manager with given configuration."""
         super().__init__(**data)
-        object.__setattr__(self, "_accumulated_results", [])
-        object.__setattr__(self, "_total_saved", 0)
 
     @property
     def checkpoint_path(self) -> str:
@@ -88,13 +91,13 @@ class LLMCheckpointManager(BaseModel):
                 response.release_conn()
 
             df = pl.read_parquet(io.BytesIO(data))
-            object.__setattr__(self, "_total_saved", len(df))
+            self._total_saved = len(df)
             return df
         except Exception:
             # No checkpoint exists
             return None
 
-    def save_batch(self, results: list[dict], force: bool = False) -> None:
+    def save_batch(self, results: list[dict[str, Any]], force: bool = False) -> None:
         """Accumulate results and save checkpoint when interval is reached.
 
         Args:
@@ -121,10 +124,7 @@ class LLMCheckpointManager(BaseModel):
         new_df = pl.DataFrame(self._accumulated_results)
 
         # Combine with existing
-        if existing_df is not None:
-            combined_df = pl.concat([existing_df, new_df])
-        else:
-            combined_df = new_df
+        combined_df = pl.concat([existing_df, new_df]) if existing_df is not None else new_df
 
         # Serialize to Parquet
         buffer = io.BytesIO()
@@ -140,14 +140,14 @@ class LLMCheckpointManager(BaseModel):
             content_type="application/octet-stream",
         )
 
-        object.__setattr__(self, "_total_saved", len(combined_df))
-        object.__setattr__(self, "_accumulated_results", [])
+        self._total_saved = len(combined_df)
+        self._accumulated_results = []
 
-    def finalize(self) -> pl.DataFrame:
+    def finalize(self) -> pl.DataFrame | None:
         """Flush any remaining results and return final DataFrame.
 
         Returns:
-            Complete DataFrame with all processed results.
+            Complete DataFrame with all processed results, or None if no data.
         """
         # Flush any remaining accumulated results
         if self._accumulated_results:
@@ -159,10 +159,8 @@ class LLMCheckpointManager(BaseModel):
     def cleanup(self) -> None:
         """Delete checkpoint file after successful completion."""
         client = self.minio.get_client()
-        try:
+        with contextlib.suppress(Exception):
             client.remove_object(self.bucket, self.checkpoint_path)
-        except Exception:
-            pass  # Ignore if doesn't exist
 
     @property
     def processed_count(self) -> int:
@@ -173,11 +171,11 @@ class LLMCheckpointManager(BaseModel):
 def process_with_checkpoint(
     df: pl.DataFrame,
     id_column: str,
-    process_fn: callable,
+    process_fn: Callable[[dict[str, Any]], dict[str, Any]],
     checkpoint_manager: LLMCheckpointManager,
     batch_size: int = 10,
-    logger=None,
-) -> pl.DataFrame:
+    logger: DagsterLogManager | None = None,
+) -> pl.DataFrame | None:
     """Process DataFrame rows with checkpointing for LLM operations.
 
     Generic helper that handles checkpoint loading, resumption, and saving.
@@ -205,7 +203,9 @@ def process_with_checkpoint(
     # Filter to unprocessed rows
     to_process = df.filter(~pl.col(id_column).is_in(list(processed_ids)))
     if logger:
-        logger.info(f"Processing {len(to_process)} remaining rows (skipping {len(processed_ids)} already done)")
+        logger.info(
+            f"Processing {len(to_process)} remaining rows (skipping {len(processed_ids)} already done)"
+        )
 
     if len(to_process) == 0:
         return existing
@@ -214,7 +214,7 @@ def process_with_checkpoint(
     rows = to_process.to_dicts()
     batch_results = []
 
-    for i, row in enumerate(rows):
+    for _i, row in enumerate(rows):
         result = process_fn(row)
         batch_results.append(result)
 

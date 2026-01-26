@@ -14,13 +14,22 @@ How it works:
 6. No manual intervention required!
 """
 
+from __future__ import annotations
+
 import json
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import requests
 from dagster import ConfigurableResource
 from pydantic import Field
+
+from brev_pipelines.types import SafeSynthConfig, SafeSynthEvaluationResult, SafeSynthJobStatus
+
+if TYPE_CHECKING:
+    from datetime import datetime
+
+    from brev_pipelines.types import K8sAppsV1Api, K8sBatchV1Api, K8sCoreV1Api
 
 
 class SafeSynthesizerResource(ConfigurableResource):
@@ -88,7 +97,7 @@ class SafeSynthesizerResource(ConfigurableResource):
         description="Kubernetes priority class for preemption",
     )
 
-    def _get_k8s_batch_client(self) -> Any:
+    def _get_k8s_batch_client(self) -> K8sBatchV1Api:
         """Get Kubernetes batch API client."""
         from kubernetes import client, config
 
@@ -96,9 +105,9 @@ class SafeSynthesizerResource(ConfigurableResource):
             config.load_incluster_config()
         except config.ConfigException:
             config.load_kube_config()
-        return client.BatchV1Api()
+        return client.BatchV1Api()  # type: ignore[no-any-return]
 
-    def _get_k8s_core_client(self) -> Any:
+    def _get_k8s_core_client(self) -> K8sCoreV1Api:
         """Get Kubernetes core API client."""
         from kubernetes import client, config
 
@@ -106,9 +115,9 @@ class SafeSynthesizerResource(ConfigurableResource):
             config.load_incluster_config()
         except config.ConfigException:
             config.load_kube_config()
-        return client.CoreV1Api()
+        return client.CoreV1Api()  # type: ignore[no-any-return]
 
-    def _get_k8s_apps_client(self) -> Any:
+    def _get_k8s_apps_client(self) -> K8sAppsV1Api:
         """Get Kubernetes apps API client."""
         from kubernetes import client, config
 
@@ -116,7 +125,7 @@ class SafeSynthesizerResource(ConfigurableResource):
             config.load_incluster_config()
         except config.ConfigException:
             config.load_kube_config()
-        return client.AppsV1Api()
+        return client.AppsV1Api()  # type: ignore[no-any-return]
 
     def _scale_deployment(self, replicas: int) -> None:
         """Scale the nemo-safe-synthesizer deployment.
@@ -148,31 +157,24 @@ class SafeSynthesizerResource(ConfigurableResource):
                 name=self.deployment_name,
                 namespace=self.namespace,
             )
-            if (
-                deployment.status.ready_replicas
-                and deployment.status.ready_replicas >= 1
-            ):
+            if deployment.status.ready_replicas and deployment.status.ready_replicas >= 1:
                 # Also verify the service is responding
                 try:
-                    response = requests.get(
-                        f"{self.service_endpoint}/health", timeout=10
-                    )
+                    response = requests.get(f"{self.service_endpoint}/health", timeout=10)
                     if response.status_code == 200:
                         return True
                 except Exception:
                     pass
             time.sleep(10)
 
-        raise TimeoutError(
-            f"{self.deployment_name} deployment not ready after {timeout} seconds"
-        )
+        raise TimeoutError(f"{self.deployment_name} deployment not ready after {timeout} seconds")
 
     def create_synthesis_job(
         self,
         job_name: str,
         input_data_path: str,
         output_data_path: str,
-        synth_config: dict[str, Any] | None = None,
+        synth_config: SafeSynthConfig | None = None,
     ) -> str:
         """Create a Kubernetes Job for synthetic data generation.
 
@@ -190,7 +192,7 @@ class SafeSynthesizerResource(ConfigurableResource):
         batch_api = self._get_k8s_batch_client()
 
         # Default synthesis config
-        config_defaults = {
+        config_defaults: dict[str, object] = {
             "epsilon": 1.0,
             "delta": 1e-5,
             "piiReplacement": True,
@@ -231,9 +233,7 @@ class SafeSynthesizerResource(ConfigurableResource):
                         priority_class_name=self.priority_class,
                         restart_policy="Never",
                         runtime_class_name="nvidia",
-                        image_pull_secrets=[
-                            client.V1LocalObjectReference(name="ngc-image-pull")
-                        ],
+                        image_pull_secrets=[client.V1LocalObjectReference(name="ngc-image-pull")],
                         tolerations=[
                             client.V1Toleration(
                                 key="nvidia.com/gpu",
@@ -256,12 +256,8 @@ class SafeSynthesizerResource(ConfigurableResource):
                                         ),
                                     ),
                                     client.V1EnvVar(name="LOG_LEVEL", value="INFO"),
-                                    client.V1EnvVar(
-                                        name="INPUT_PATH", value=input_data_path
-                                    ),
-                                    client.V1EnvVar(
-                                        name="OUTPUT_PATH", value=output_data_path
-                                    ),
+                                    client.V1EnvVar(name="INPUT_PATH", value=input_data_path),
+                                    client.V1EnvVar(name="OUTPUT_PATH", value=output_data_path),
                                     client.V1EnvVar(
                                         name="SYNTH_CONFIG",
                                         value=json.dumps(config_defaults),
@@ -290,7 +286,7 @@ class SafeSynthesizerResource(ConfigurableResource):
         batch_api.create_namespaced_job(namespace=self.namespace, body=job)
         return job_name
 
-    def wait_for_job(self, job_name: str) -> dict[str, Any]:
+    def wait_for_job(self, job_name: str) -> SafeSynthJobStatus:
         """Wait for a job to complete.
 
         Args:
@@ -316,14 +312,16 @@ class SafeSynthesizerResource(ConfigurableResource):
                 )
 
                 if job.status.succeeded and job.status.succeeded > 0:
+                    # Get completion time (Kubernetes returns datetime)
+                    completion_time = job.status.completion_time
+                    completion_str = ""
+                    if completion_time is not None:
+                        # Kubernetes returns datetime, cast for type safety
+                        completion_str = cast("datetime", completion_time).isoformat()
                     return {
                         "state": "completed",
                         "succeeded": job.status.succeeded,
-                        "completion_time": (
-                            job.status.completion_time.isoformat()
-                            if job.status.completion_time
-                            else None
-                        ),
+                        "completion_time": completion_str,
                     }
 
                 if job.status.failed and job.status.failed > 0:
@@ -333,14 +331,12 @@ class SafeSynthesizerResource(ConfigurableResource):
 
             except ApiException as e:
                 if e.status == 404:
-                    raise RuntimeError(f"Job {job_name} not found")
+                    raise RuntimeError(f"Job {job_name} not found") from e
                 raise
 
             time.sleep(self.poll_interval)
 
-        raise TimeoutError(
-            f"Job {job_name} did not complete in {self.max_wait_time} seconds"
-        )
+        raise TimeoutError(f"Job {job_name} did not complete in {self.max_wait_time} seconds")
 
     def _get_job_logs(self, job_name: str) -> str:
         """Get logs from a job's pod."""
@@ -387,8 +383,8 @@ class SafeSynthesizerResource(ConfigurableResource):
         self,
         input_data: list[dict[str, Any]],
         run_id: str,
-        config: dict[str, Any] | None = None,
-    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        config: SafeSynthConfig | None = None,
+    ) -> tuple[list[dict[str, Any]], SafeSynthEvaluationResult]:
         """Run full synthesis pipeline with automatic GPU orchestration.
 
         This method automatically:
@@ -446,9 +442,10 @@ class SafeSynthesizerResource(ConfigurableResource):
                 timeout=30,
             )
             if response.status_code == 200:
-                result = response.json()
+                result: dict[str, str] = response.json()
                 # Returns {'url': 'datasets/default/repo-name'}
-                return result.get("url", f"default/{repo_name}").replace("datasets/", "")
+                url: str = result.get("url", f"default/{repo_name}")
+                return url.replace("datasets/", "")
             elif response.status_code == 409:
                 # Already exists
                 return f"default/{repo_name}"
@@ -585,9 +582,9 @@ size {file_size}
     def _synthesize_via_api(
         self,
         data: list[dict[str, Any]],
-        config: dict[str, Any] | None = None,
+        config: SafeSynthConfig | None = None,
         run_id: str | None = None,
-    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], SafeSynthEvaluationResult]:
         """Synthesize data via the Safe Synthesizer API.
 
         This method:
@@ -655,11 +652,12 @@ size {file_size}
         }
 
         # Add differential privacy if epsilon is specified
-        if config and config.get("epsilon"):
+        epsilon = config.get("epsilon") if config else None
+        if epsilon is not None:
             synth_config["privacy"] = {
                 "dp_enabled": True,
-                "epsilon": config["epsilon"],
-                "delta": config.get("delta", "auto"),
+                "epsilon": epsilon,
+                "delta": config.get("delta", "auto") if config else "auto",
             }
 
         # Create job payload
@@ -706,7 +704,7 @@ size {file_size}
                 import pandas as pd
 
                 synth_df = pd.read_parquet(io.BytesIO(synth_response.content))
-                synthetic_data = synth_df.to_dict("records")
+                synthetic_data: list[dict[str, Any]] = synth_df.to_dict("records")
 
                 # Get evaluation summary
                 summary_response = requests.get(
@@ -730,12 +728,12 @@ size {file_size}
                     # HTML report is optional - don't fail if unavailable
                     pass
 
-                evaluation = {
+                evaluation: SafeSynthEvaluationResult = {
                     "job_id": job_id,
-                    "mia_score": summary.get("membership_inference_protection_score"),
-                    "aia_score": summary.get("attribute_inference_protection_score"),
-                    "privacy_passed": summary.get("data_privacy_score", 0) > 0.7,
-                    "quality_score": summary.get("synthetic_data_quality_score"),
+                    "mia_score": summary.get("membership_inference_protection_score") or 0.0,
+                    "aia_score": summary.get("attribute_inference_protection_score") or 0.0,
+                    "privacy_passed": (summary.get("data_privacy_score") or 0) > 0.7,
+                    "quality_score": summary.get("synthetic_data_quality_score") or 0.0,
                     "html_report_bytes": html_report_bytes,
                 }
 
@@ -743,15 +741,11 @@ size {file_size}
 
             elif job_status in ("error", "cancelled"):
                 error_details = status.get("error_details", {})
-                raise RuntimeError(
-                    f"Job {job_id} failed with status {job_status}: {error_details}"
-                )
+                raise RuntimeError(f"Job {job_id} failed with status {job_status}: {error_details}")
 
             time.sleep(self.poll_interval)
 
-        raise TimeoutError(
-            f"Job {job_id} did not complete in {self.max_wait_time} seconds"
-        )
+        raise TimeoutError(f"Job {job_id} did not complete in {self.max_wait_time} seconds")
 
     def health_check(self) -> bool:
         """Check if Safe Synthesizer service is healthy."""

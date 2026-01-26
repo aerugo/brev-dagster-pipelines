@@ -39,9 +39,7 @@ defs = Definitions(
             secret_key=EnvVar("LAKEFS_SECRET_ACCESS_KEY"),
         ),
         "nim": NIMResource(
-            endpoint=os.getenv(
-                "NIM_ENDPOINT", "http://nim-llm.nvidia-ai.svc.cluster.local:8000"
-            ),
+            endpoint=os.getenv("NIM_ENDPOINT", "http://nim-llm.nvidia-ai.svc.cluster.local:8000"),
         ),
         "nim_reasoning": NIMResource(
             endpoint=os.getenv(
@@ -73,9 +71,7 @@ defs = Definitions(
         "weaviate": WeaviateResource(
             host=os.getenv("WEAVIATE_HOST", "weaviate.weaviate.svc.cluster.local"),
             port=int(os.getenv("WEAVIATE_PORT", "80")),
-            grpc_host=os.getenv(
-                "WEAVIATE_GRPC_HOST", "weaviate-grpc.weaviate.svc.cluster.local"
-            ),
+            grpc_host=os.getenv("WEAVIATE_GRPC_HOST", "weaviate-grpc.weaviate.svc.cluster.local"),
             grpc_port=int(os.getenv("WEAVIATE_GRPC_PORT", "50051")),
         ),
     },

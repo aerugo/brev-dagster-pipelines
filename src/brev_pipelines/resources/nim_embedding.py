@@ -16,7 +16,7 @@ from dagster import ConfigurableResource
 from pydantic import Field
 
 
-class NIMEmbeddingResource(ConfigurableResource):
+class NIMEmbeddingResource(ConfigurableResource):  # type: ignore[type-arg]
     """NIM embedding resource for generating text embeddings via local NIM.
 
     Attributes:
@@ -160,9 +160,7 @@ class NIMEmbeddingResource(ConfigurableResource):
                 mock_embeddings.append(embedding)
             return mock_embeddings
 
-        raise RuntimeError(
-            f"NIM embedding error after {self.max_retries} attempts: {last_error}"
-        )
+        raise RuntimeError(f"NIM embedding error after {self.max_retries} attempts: {last_error}")
 
     def health_check(self) -> bool:
         """Check if the NIM embedding service is healthy.

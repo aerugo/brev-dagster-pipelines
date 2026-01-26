@@ -24,17 +24,19 @@ def raw_sample_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
     regions = ["North", "South", "East", "West", "Central"]
     categories = ["Premium", "Standard", "Basic"]
 
-    data = []
+    data: list[dict[str, Any]] = []
     for i in range(100):
-        data.append({
-            "id": f"CUST-{i:04d}",
-            "name": f"Customer {i}",
-            "age": random.randint(18, 75),
-            "region": random.choice(regions),
-            "category": random.choice(categories),
-            "spend": round(random.uniform(100, 10000), 2),
-            "active": random.random() > 0.2,
-        })
+        data.append(
+            {
+                "id": f"CUST-{i:04d}",
+                "name": f"Customer {i}",
+                "age": random.randint(18, 75),
+                "region": random.choice(regions),
+                "category": random.choice(categories),
+                "spend": round(random.uniform(100, 10000), 2),
+                "active": random.random() > 0.2,
+            }
+        )
 
     df = pd.DataFrame(data)
     context.log.info(f"Generated {len(df)} sample records")
@@ -87,11 +89,11 @@ def nim_enriched_data(
     sample_size = min(10, len(df))
     sample_indices = df.sample(sample_size, random_state=42).index
 
-    profiles = []
+    profiles: list[str] = []
     for idx, row in df.iterrows():
         if idx in sample_indices:
             prompt = f"""Generate a brief customer profile (1 sentence) for:
-- Age: {row['age']}, Region: {row['region']}, Category: {row['category']}, Tier: {row['tier']}
+- Age: {row["age"]}, Region: {row["region"]}, Category: {row["category"]}, Tier: {row["tier"]}
 Be concise."""
             context.log.info(f"Calling NIM for {row['id']}...")
             profile = nim.generate(prompt, max_tokens=50)
@@ -100,7 +102,9 @@ Be concise."""
             profiles.append("Not enriched (sample limit)")
 
     df["ai_profile"] = profiles
-    enriched_count = sum(1 for p in profiles if "error" not in p.lower() and "Not enriched" not in p)
+    enriched_count = sum(
+        1 for p in profiles if "error" not in p.lower() and "Not enriched" not in p
+    )
     context.log.info(f"Enriched {enriched_count}/{len(df)} records")
     return df
 

@@ -5,7 +5,7 @@ from minio import Minio
 from pydantic import Field
 
 
-class MinIOResource(ConfigurableResource):
+class MinIOResource(ConfigurableResource):  # type: ignore[type-arg]
     """MinIO S3-compatible storage resource."""
 
     endpoint: str = Field(description="MinIO endpoint (host:port)")

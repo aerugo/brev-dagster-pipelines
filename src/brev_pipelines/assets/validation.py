@@ -13,7 +13,7 @@ import io
 import json
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import dagster as dg
@@ -73,7 +73,7 @@ def validate_minio(
     result = ValidationResult(component="minio", passed=True)
     test_bucket = "validation-test-bucket"
     test_key = "validation/test.json"
-    test_data = {"test": True, "timestamp": datetime.now(timezone.utc).isoformat()}
+    test_data = {"test": True, "timestamp": datetime.now(UTC).isoformat()}
 
     try:
         client = minio.get_client()
@@ -93,12 +93,14 @@ def validate_minio(
         try:
             buckets = client.list_buckets()
             bucket_names = [b.name for b in buckets]
-            result.tests.append({
-                "name": "list_buckets",
-                "passed": True,
-                "bucket_count": len(buckets),
-                "buckets": bucket_names,
-            })
+            result.tests.append(
+                {
+                    "name": "list_buckets",
+                    "passed": True,
+                    "bucket_count": len(buckets),
+                    "buckets": bucket_names,
+                }
+            )
         except Exception as e:
             result.tests.append({"name": "list_buckets", "passed": False, "error": str(e)})
             result.passed = False
@@ -139,11 +141,13 @@ def validate_minio(
             if read_data == test_data:
                 result.tests.append({"name": "read_object", "passed": True, "data_matches": True})
             else:
-                result.tests.append({
-                    "name": "read_object",
-                    "passed": False,
-                    "error": "Data mismatch",
-                })
+                result.tests.append(
+                    {
+                        "name": "read_object",
+                        "passed": False,
+                        "error": "Data mismatch",
+                    }
+                )
                 result.passed = False
         except Exception as e:
             result.tests.append({"name": "read_object", "passed": False, "error": str(e)})
@@ -217,12 +221,14 @@ def validate_lakefs(
         context.log.info("Test 2: List repositories...")
         try:
             repos = lakefs.list_repositories()
-            result.tests.append({
-                "name": "list_repositories",
-                "passed": True,
-                "repository_count": len(repos),
-                "repositories": repos,
-            })
+            result.tests.append(
+                {
+                    "name": "list_repositories",
+                    "passed": True,
+                    "repository_count": len(repos),
+                    "repositories": repos,
+                }
+            )
         except Exception as e:
             result.tests.append({"name": "list_repositories", "passed": False, "error": str(e)})
             result.passed = False
@@ -232,11 +238,13 @@ def validate_lakefs(
         try:
             # Verify client can be created (validates endpoint/credentials)
             _ = lakefs.get_client()
-            result.tests.append({
-                "name": "api_version",
-                "passed": True,
-                "endpoint": lakefs.endpoint,
-            })
+            result.tests.append(
+                {
+                    "name": "api_version",
+                    "passed": True,
+                    "endpoint": lakefs.endpoint,
+                }
+            )
         except Exception as e:
             result.tests.append({"name": "api_version", "passed": False, "error": str(e)})
             # Not a critical failure
@@ -297,12 +305,14 @@ def validate_nim(
             test_prompt = "Complete this sentence with exactly 5 words: The sky is"
             response = nim.generate(test_prompt, max_tokens=20)
             has_content = len(response.strip()) > 0 and "error" not in response.lower()
-            result.tests.append({
-                "name": "simple_completion",
-                "passed": has_content,
-                "prompt": test_prompt,
-                "response": response[:100],  # Truncate for logging
-            })
+            result.tests.append(
+                {
+                    "name": "simple_completion",
+                    "passed": has_content,
+                    "prompt": test_prompt,
+                    "response": response[:100],  # Truncate for logging
+                }
+            )
             if not has_content:
                 result.passed = False
         except Exception as e:
@@ -312,15 +322,17 @@ def validate_nim(
         # Test 3: Response quality (structured output)
         context.log.info("Test 3: Structured response test...")
         try:
-            json_prompt = "Return only a valid JSON object with keys 'status' and 'message'. Example: {\"status\": \"ok\", \"message\": \"working\"}"
+            json_prompt = 'Return only a valid JSON object with keys \'status\' and \'message\'. Example: {"status": "ok", "message": "working"}'
             response = nim.generate(json_prompt, max_tokens=50)
             # Check if response looks like JSON
             is_json_like = "{" in response and "}" in response
-            result.tests.append({
-                "name": "structured_response",
-                "passed": is_json_like,
-                "response": response[:100],
-            })
+            result.tests.append(
+                {
+                    "name": "structured_response",
+                    "passed": is_json_like,
+                    "response": response[:100],
+                }
+            )
             # Not a critical failure if JSON isn't perfect
         except Exception as e:
             result.tests.append({"name": "structured_response", "passed": False, "error": str(e)})
@@ -371,30 +383,32 @@ def validate_platform(
     all_passed = all(c["passed"] for c in components.values())
     passed_count = sum(1 for c in components.values() if c["passed"])
 
-    # Create comprehensive report
-    report = {
+    # Create comprehensive report with typed intermediate dicts
+    overall_status = "PASSED" if all_passed else "FAILED"
+    summary: dict[str, str] = {
+        "minio": "✅ PASSED" if validate_minio["passed"] else "❌ FAILED",
+        "lakefs": "✅ PASSED" if validate_lakefs["passed"] else "❌ FAILED",
+        "nim": "✅ PASSED" if validate_nim["passed"] else "❌ FAILED",
+    }
+    report: dict[str, object] = {
         "validation_run": {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "overall_status": "PASSED" if all_passed else "FAILED",
+            "timestamp": datetime.now(UTC).isoformat(),
+            "overall_status": overall_status,
             "passed_components": passed_count,
             "total_components": len(components),
         },
         "components": components,
-        "summary": {
-            "minio": "✅ PASSED" if validate_minio["passed"] else "❌ FAILED",
-            "lakefs": "✅ PASSED" if validate_lakefs["passed"] else "❌ FAILED",
-            "nim": "✅ PASSED" if validate_nim["passed"] else "❌ FAILED",
-        },
+        "summary": summary,
     }
 
     # Log summary
     context.log.info("=" * 60)
     context.log.info("PLATFORM VALIDATION REPORT")
     context.log.info("=" * 60)
-    for comp, status in report["summary"].items():
+    for comp, status in summary.items():
         context.log.info(f"  {comp.upper():10} {status}")
     context.log.info("=" * 60)
-    context.log.info(f"OVERALL: {report['validation_run']['overall_status']}")
+    context.log.info(f"OVERALL: {overall_status}")
     context.log.info("=" * 60)
 
     # Store report to MinIO
@@ -404,7 +418,7 @@ def validate_platform(
         client = minio.get_client()
 
         # Store timestamped report
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         report_key = f"validation/report_{timestamp}.json"
 
         data = json.dumps(report, indent=2).encode()
@@ -484,15 +498,16 @@ def quick_health_check(
 
     # Summary
     all_healthy = all(r["status"] == "healthy" for r in results.values())
+    overall_status = "healthy" if all_healthy else "unhealthy"
 
-    report = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "overall_status": "healthy" if all_healthy else "unhealthy",
+    report: dict[str, object] = {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "overall_status": overall_status,
         "services": results,
         "duration_ms": (time.time() - start) * 1000,
     }
 
-    context.log.info(f"Quick health check: {report['overall_status'].upper()}")
+    context.log.info(f"Quick health check: {overall_status.upper()}")
     for svc, status in results.items():
         icon = "✅" if status["status"] == "healthy" else "❌"
         context.log.info(f"  {icon} {svc}: {status['status']}")

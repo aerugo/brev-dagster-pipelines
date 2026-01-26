@@ -6,14 +6,13 @@ Follows NEW INV-D004 (Weaviate Collections for Vector Data).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import polars as pl
 from dagster import ConfigurableIOManager, InputContext, OutputContext
 from pydantic import Field
 
-if TYPE_CHECKING:
-    from brev_pipelines.resources.weaviate import WeaviateResource
+# Import at runtime - Dagster ConfigurableIOManager needs actual type for validation
+from brev_pipelines.resources.weaviate import WeaviateResource
+from brev_pipelines.types import WeaviatePropertyDef
 
 
 class WeaviateIOManager(ConfigurableIOManager):
@@ -65,7 +64,7 @@ class WeaviateIOManager(ConfigurableIOManager):
         collection_name = "".join(word.title() for word in collection_name.split())
 
         # Define schema from DataFrame columns
-        properties = []
+        properties: list[WeaviatePropertyDef] = []
         for col in df.columns:
             dtype = df[col].dtype
             prop_type = "text"
@@ -78,7 +77,7 @@ class WeaviateIOManager(ConfigurableIOManager):
             elif dtype in (pl.Float32, pl.Float64):
                 prop_type = "number"
 
-            properties.append({"name": col, "type": prop_type})
+            properties.append(WeaviatePropertyDef(name=col, type=prop_type))
 
         # Ensure collection exists
         vector_dims = len(embeddings[0]) if embeddings else 1024

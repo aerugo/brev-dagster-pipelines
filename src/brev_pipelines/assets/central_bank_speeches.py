@@ -26,7 +26,7 @@ Trial Run Mode:
 import io
 import json
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import dagster as dg
@@ -39,20 +39,33 @@ from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.nim import NIMResource
 from brev_pipelines.resources.nim_embedding import NIMEmbeddingResource
 from brev_pipelines.resources.weaviate import WeaviateResource
+from brev_pipelines.types import WeaviatePropertyDef
 
 # Collection schema for Weaviate
-SPEECHES_SCHEMA: list[dict[str, str]] = [
-    {"name": "reference", "type": "text", "description": "Unique identifier from source"},
-    {"name": "date", "type": "text", "description": "Speech date (ISO format)"},
-    {"name": "central_bank", "type": "text", "description": "Issuing institution"},
-    {"name": "speaker", "type": "text", "description": "Speaker name"},
-    {"name": "title", "type": "text", "description": "Speech title"},
-    {"name": "text", "type": "text", "description": "Full speech text"},
-    {"name": "monetary_stance", "type": "int", "description": "1=very_dovish to 5=very_hawkish"},
-    {"name": "trade_stance", "type": "int", "description": "1=very_protectionist to 5=very_globalist"},
-    {"name": "tariff_mention", "type": "boolean", "description": "Contains tariff/protectionist discussion"},
-    {"name": "economic_outlook", "type": "int", "description": "1=very_negative to 5=very_positive"},
-    {"name": "is_governor", "type": "boolean", "description": "Speaker is governor/president/chair"},
+SPEECHES_SCHEMA: list[WeaviatePropertyDef] = [
+    WeaviatePropertyDef(name="reference", type="text", description="Unique identifier from source"),
+    WeaviatePropertyDef(name="date", type="text", description="Speech date (ISO format)"),
+    WeaviatePropertyDef(name="central_bank", type="text", description="Issuing institution"),
+    WeaviatePropertyDef(name="speaker", type="text", description="Speaker name"),
+    WeaviatePropertyDef(name="title", type="text", description="Speech title"),
+    WeaviatePropertyDef(name="text", type="text", description="Full speech text"),
+    WeaviatePropertyDef(
+        name="monetary_stance", type="int", description="1=very_dovish to 5=very_hawkish"
+    ),
+    WeaviatePropertyDef(
+        name="trade_stance", type="int", description="1=very_protectionist to 5=very_globalist"
+    ),
+    WeaviatePropertyDef(
+        name="tariff_mention",
+        type="boolean",
+        description="Contains tariff/protectionist discussion",
+    ),
+    WeaviatePropertyDef(
+        name="economic_outlook", type="int", description="1=very_negative to 5=very_positive"
+    ),
+    WeaviatePropertyDef(
+        name="is_governor", type="boolean", description="Speaker is governor/president/chair"
+    ),
 ]
 
 
@@ -86,7 +99,7 @@ def raw_speeches(
     import os
 
     import kagglehub
-    from lakefs_sdk.models import CommitCreation
+    from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
 
     context.log.info("Downloading central-bank-speeches dataset from Kaggle...")
 
@@ -149,6 +162,8 @@ def raw_speeches(
                     "num_records": str(len(df)),
                     "sample_size": str(config.sample_size) if config.sample_size > 0 else "full",
                 },
+                date=None,
+                allow_empty=False,
             ),
         )
         context.log.info(f"LakeFS commit: {commit.id}")
@@ -195,16 +210,18 @@ def cleaned_speeches(
     context.log.info(f"Input schema: {df.schema}")
 
     # Fill nulls for all columns based on their type
-    fill_expressions = []
+    # Note: Pyright warnings about polars types are expected (incomplete stubs)
+    fill_expressions: list[pl.Expr] = []
     for col_name in df.columns:
         dtype = df.schema[col_name]
-        if dtype == pl.Utf8 or dtype == pl.String:
+        dtype_str = str(dtype)
+        if dtype_str in ("Utf8", "String"):
             fill_expressions.append(pl.col(col_name).fill_null(""))
-        elif dtype in (pl.Int8, pl.Int16, pl.Int32, pl.Int64, pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64):
+        elif "Int" in dtype_str or "UInt" in dtype_str:
             fill_expressions.append(pl.col(col_name).fill_null(0))
-        elif dtype in (pl.Float32, pl.Float64):
+        elif "Float" in dtype_str:
             fill_expressions.append(pl.col(col_name).fill_null(0.0))
-        elif dtype == pl.Boolean:
+        elif dtype_str == "Boolean":
             fill_expressions.append(pl.col(col_name).fill_null(False))
         # For other types (Date, Datetime, etc.), leave as-is
 
@@ -251,7 +268,7 @@ def speech_embeddings(
     Returns:
         Tuple of (DataFrame, list of 1024-dim embedding vectors).
     """
-    df = cleaned_speeches
+    df = cleaned_speeches  # pl.DataFrame
 
     # Create checkpoint manager for embeddings
     checkpoint_mgr = LLMCheckpointManager(
@@ -263,14 +280,16 @@ def speech_embeddings(
 
     # Load existing checkpoint
     existing_checkpoint = checkpoint_mgr.load()
-    processed_refs = set()
+    processed_refs: set[str] = set()
     if existing_checkpoint is not None:
         processed_refs = set(existing_checkpoint["reference"].to_list())
         context.log.info(f"Loaded checkpoint with {len(processed_refs)} embeddings")
 
     # Filter to unprocessed rows
     to_process = df.filter(~pl.col("reference").is_in(list(processed_refs)))
-    context.log.info(f"Processing {len(to_process)} remaining rows (skipping {len(processed_refs)} already done)")
+    context.log.info(
+        f"Processing {len(to_process)} remaining rows (skipping {len(processed_refs)} already done)"
+    )
 
     # Process in batches with checkpointing
     batch_size = 32
@@ -280,7 +299,7 @@ def speech_embeddings(
         batch = rows[i : i + batch_size]
 
         # Prepare texts for this batch
-        texts = []
+        texts: list[str] = []
         for row in batch:
             title = row.get("title", "") or ""
             text = row.get("text", "") or ""
@@ -292,10 +311,15 @@ def speech_embeddings(
 
         # Save to checkpoint
         for j, row in enumerate(batch):
-            checkpoint_mgr.save_batch([{
-                "reference": row["reference"],
-                "embedding": batch_embeddings[j],
-            }], force=(j == len(batch) - 1))  # Force save at end of batch
+            checkpoint_mgr.save_batch(
+                [
+                    {
+                        "reference": row["reference"],
+                        "embedding": batch_embeddings[j],
+                    }
+                ],
+                force=(j == len(batch) - 1),
+            )  # Force save at end of batch
 
         context.log.info(f"Checkpoint saved: {checkpoint_mgr.processed_count} embeddings complete")
 
@@ -306,11 +330,12 @@ def speech_embeddings(
     checkpoint_mgr.cleanup()
 
     # Build embeddings list in DataFrame order
-    embedding_map = {}
-    for row in final_checkpoint.to_dicts():
-        embedding_map[row["reference"]] = row["embedding"]
+    embedding_map: dict[str, list[float]] = {}
+    if final_checkpoint is not None:
+        for row in final_checkpoint.to_dicts():
+            embedding_map[row["reference"]] = row["embedding"]
 
-    embeddings = []
+    embeddings: list[list[float]] = []
     for row in df.iter_rows(named=True):
         ref = row["reference"]
         if ref in embedding_map:
@@ -322,9 +347,7 @@ def speech_embeddings(
             combined = f"{title}\n\n{text[:2000]}"
             embeddings.append(nim_embedding.embed_text(combined))
 
-    context.log.info(
-        f"Generated {len(embeddings)} embeddings, dimension: {len(embeddings[0])}"
-    )
+    context.log.info(f"Generated {len(embeddings)} embeddings, dimension: {len(embeddings[0])}")
 
     return (df, embeddings)
 
@@ -427,7 +450,7 @@ def speech_classification(
         checkpoint_interval=10,
     )
 
-    def classify_speech(row: dict) -> dict:
+    def classify_speech(row: dict[str, Any]) -> dict[str, Any]:
         """Classify a single speech and return result dict."""
         reference = row["reference"]
         text_excerpt = (row.get("text", "") or "")[:4000]
@@ -490,15 +513,21 @@ Classification:"""
     # Clean up checkpoint on success
     checkpoint_mgr.cleanup()
 
+    if results_df is None:
+        msg = "Classification checkpoint returned no results"
+        raise RuntimeError(msg)
+
     # Join results back to original DataFrame
     df = df.join(
-        results_df.select([
-            "reference",
-            pl.col("monetary_stance").cast(pl.Int8),
-            pl.col("trade_stance").cast(pl.Int8),
-            pl.col("tariff_mention").cast(pl.Int8),
-            pl.col("economic_outlook").cast(pl.Int8),
-        ]),
+        results_df.select(
+            [
+                "reference",
+                pl.col("monetary_stance").cast(pl.Int8),
+                pl.col("trade_stance").cast(pl.Int8),
+                pl.col("tariff_mention").cast(pl.Int8),
+                pl.col("economic_outlook").cast(pl.Int8),
+            ]
+        ),
         on="reference",
         how="left",
     )
@@ -573,7 +602,7 @@ def speech_summaries(
         checkpoint_interval=10,
     )
 
-    def summarize_speech(row: dict) -> dict:
+    def summarize_speech(row: dict[str, Any]) -> dict[str, Any]:
         """Generate summary for a single speech and return result dict."""
         reference = row["reference"]
         title = row.get("title", "") or "Untitled"
@@ -628,6 +657,10 @@ Generate a COMPACT bullet-point summary (under 1000 characters total):"""
 
     # Clean up checkpoint on success
     checkpoint_mgr.cleanup()
+
+    if results_df is None:
+        msg = "Summarization checkpoint returned no results"
+        raise RuntimeError(msg)
 
     # Log summary statistics
     summaries = results_df["summary"].to_list()
@@ -691,9 +724,7 @@ def enriched_speeches(
     )
 
     # Add processing timestamp
-    df = df.with_columns(
-        pl.lit(datetime.now(timezone.utc).isoformat()).alias("processed_at")
-    )
+    df = df.with_columns(pl.lit(datetime.now(UTC).isoformat()).alias("processed_at"))
 
     context.log.info(f"Created enriched data product with {len(df)} speeches")
     context.log.info(f"Columns: {df.columns}")
@@ -703,9 +734,15 @@ def enriched_speeches(
     context.log.info(f"Speeches with summaries: {summary_count}/{len(df)}")
 
     # Log classification statistics
-    context.log.info(f"Monetary stance distribution: {df['monetary_stance'].value_counts().sort('monetary_stance')}")
-    context.log.info(f"Trade stance distribution: {df['trade_stance'].value_counts().sort('trade_stance')}")
-    context.log.info(f"Economic outlook distribution: {df['economic_outlook'].value_counts().sort('economic_outlook')}")
+    context.log.info(
+        f"Monetary stance distribution: {df['monetary_stance'].value_counts().sort('monetary_stance')}"
+    )
+    context.log.info(
+        f"Trade stance distribution: {df['trade_stance'].value_counts().sort('trade_stance')}"
+    )
+    context.log.info(
+        f"Economic outlook distribution: {df['economic_outlook'].value_counts().sort('economic_outlook')}"
+    )
     tariff_count = df.filter(pl.col("tariff_mention") == 1).height
     context.log.info(f"Speeches mentioning tariffs: {tariff_count}/{len(df)}")
     governor_count = df.filter(pl.col("is_gov") == 1).height
@@ -742,7 +779,7 @@ def speeches_data_product(
     Returns:
         Dictionary with storage metadata (path, commit_id, counts).
     """
-    from lakefs_sdk.models import CommitCreation
+    from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
 
     df = enriched_speeches
 
@@ -781,6 +818,8 @@ def speeches_data_product(
                     "num_records": str(len(df)),
                     "tariff_mentions": str(tariff_count),
                 },
+                date=None,
+                allow_empty=False,
             ),
         )
         commit_id = commit.id
@@ -890,6 +929,321 @@ def weaviate_index(
     }
 
 
+# ============================================================================
+# INTERMEDIATE SNAPSHOTS - Persist intermediate stages to LakeFS
+# ============================================================================
+
+
+@dg.asset(
+    description="Snapshot of classification results in LakeFS",
+    group_name="central_bank_speeches",
+    metadata={
+        "layer": "intermediate",
+        "destination": "lakefs",
+    },
+)
+def classification_snapshot(
+    context: dg.AssetExecutionContext,
+    config: PipelineConfig,
+    speech_classification: pl.DataFrame,
+    lakefs: LakeFSResource,
+) -> dict[str, Any]:
+    """Persist classification results to LakeFS for debugging and recovery.
+
+    Stores the multi-dimensional classification output (monetary stance,
+    trade stance, tariff mention, economic outlook) as a versioned snapshot.
+
+    Args:
+        context: Dagster execution context for logging.
+        config: Pipeline configuration (is_trial for path selection).
+        speech_classification: DataFrame with classification columns.
+        lakefs: LakeFS resource for data versioning.
+
+    Returns:
+        Dictionary with storage metadata.
+    """
+    from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
+
+    df = speech_classification
+
+    # Select only classification-relevant columns
+    classification_cols = [
+        "reference",
+        "monetary_stance",
+        "trade_stance",
+        "tariff_mention",
+        "economic_outlook",
+    ]
+    df_snapshot = df.select([c for c in classification_cols if c in df.columns])
+
+    # Serialize to Parquet
+    buffer = io.BytesIO()
+    df_snapshot.write_parquet(buffer)
+    parquet_bytes = buffer.getvalue()
+
+    # Get LakeFS client
+    lakefs_client = lakefs.get_client()
+
+    # Upload to LakeFS intermediate path
+    if config.is_trial:
+        path = "central-bank-speeches/trial/intermediate/classifications.parquet"
+    else:
+        path = "central-bank-speeches/intermediate/classifications.parquet"
+
+    lakefs_client.objects_api.upload_object(
+        repository="data",
+        branch="main",
+        path=path,
+        content=parquet_bytes,
+    )
+
+    # Create commit
+    commit_id = None
+    try:
+        tariff_count = df_snapshot.filter(pl.col("tariff_mention") == 1).height
+        commit = lakefs_client.commits_api.commit(
+            repository="data",
+            branch="main",
+            commit_creation=CommitCreation(
+                message=f"Snapshot: classifications ({len(df_snapshot)} records)",
+                metadata={
+                    "dagster_run_id": context.run_id or "",
+                    "snapshot_type": "classification",
+                    "num_records": str(len(df_snapshot)),
+                    "tariff_mentions": str(tariff_count),
+                },
+                date=None,
+                allow_empty=False,
+            ),
+        )
+        commit_id = commit.id
+        context.log.info(f"Classification snapshot committed: {commit_id}")
+    except Exception as e:
+        if "no changes" in str(e).lower():
+            context.log.info("No changes to commit (snapshot already exists)")
+        else:
+            raise
+
+    # Log distribution stats
+    context.log.info(f"Classification snapshot: {len(df_snapshot)} records")
+    context.log.info(
+        f"Monetary stance distribution: {df_snapshot['monetary_stance'].value_counts().sort('monetary_stance')}"
+    )
+
+    return {
+        "path": f"lakefs://data/main/{path}",
+        "commit_id": commit_id,
+        "num_records": len(df_snapshot),
+    }
+
+
+@dg.asset(
+    description="Snapshot of summaries in LakeFS",
+    group_name="central_bank_speeches",
+    metadata={
+        "layer": "intermediate",
+        "destination": "lakefs",
+    },
+)
+def summaries_snapshot(
+    context: dg.AssetExecutionContext,
+    config: PipelineConfig,
+    speech_summaries: pl.DataFrame,
+    lakefs: LakeFSResource,
+) -> dict[str, Any]:
+    """Persist summary results to LakeFS for debugging and recovery.
+
+    Stores the GPT-OSS generated summaries as a versioned snapshot.
+    These summaries capture semantic nuance beyond numeric classifications.
+
+    Args:
+        context: Dagster execution context for logging.
+        config: Pipeline configuration (is_trial for path selection).
+        speech_summaries: DataFrame with summary column.
+        lakefs: LakeFS resource for data versioning.
+
+    Returns:
+        Dictionary with storage metadata.
+    """
+    from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
+
+    df = speech_summaries
+
+    # Select only summary-relevant columns
+    df_snapshot = df.select(["reference", "summary"])
+
+    # Serialize to Parquet
+    buffer = io.BytesIO()
+    df_snapshot.write_parquet(buffer)
+    parquet_bytes = buffer.getvalue()
+
+    # Get LakeFS client
+    lakefs_client = lakefs.get_client()
+
+    # Upload to LakeFS intermediate path
+    if config.is_trial:
+        path = "central-bank-speeches/trial/intermediate/summaries.parquet"
+    else:
+        path = "central-bank-speeches/intermediate/summaries.parquet"
+
+    lakefs_client.objects_api.upload_object(
+        repository="data",
+        branch="main",
+        path=path,
+        content=parquet_bytes,
+    )
+
+    # Create commit
+    commit_id = None
+    try:
+        commit = lakefs_client.commits_api.commit(
+            repository="data",
+            branch="main",
+            commit_creation=CommitCreation(
+                message=f"Snapshot: summaries ({len(df_snapshot)} records)",
+                metadata={
+                    "dagster_run_id": context.run_id or "",
+                    "snapshot_type": "summaries",
+                    "num_records": str(len(df_snapshot)),
+                },
+                date=None,
+                allow_empty=False,
+            ),
+        )
+        commit_id = commit.id
+        context.log.info(f"Summaries snapshot committed: {commit_id}")
+    except Exception as e:
+        if "no changes" in str(e).lower():
+            context.log.info("No changes to commit (snapshot already exists)")
+        else:
+            raise
+
+    # Log stats
+    non_null_summaries = df_snapshot.filter(pl.col("summary").is_not_null()).height
+    context.log.info(
+        f"Summaries snapshot: {non_null_summaries}/{len(df_snapshot)} records with summaries"
+    )
+
+    # Sample summary lengths
+    summary_lengths = df_snapshot.select(pl.col("summary").str.len_chars().alias("len"))
+    mean_value = summary_lengths["len"].mean()
+    # Cast to float - polars mean returns complex union but we know it's numeric
+    avg_len = float(mean_value) if isinstance(mean_value, (int, float)) else 0.0
+    context.log.info(f"Average summary length: {avg_len:.0f} chars")
+
+    return {
+        "path": f"lakefs://data/main/{path}",
+        "commit_id": commit_id,
+        "num_records": len(df_snapshot),
+        "summaries_with_content": non_null_summaries,
+    }
+
+
+@dg.asset(
+    description="Snapshot of embeddings metadata in LakeFS",
+    group_name="central_bank_speeches",
+    metadata={
+        "layer": "intermediate",
+        "destination": "lakefs",
+    },
+)
+def embeddings_snapshot(
+    context: dg.AssetExecutionContext,
+    config: PipelineConfig,
+    speech_embeddings: tuple[pl.DataFrame, list[list[float]]],
+    lakefs: LakeFSResource,
+) -> dict[str, Any]:
+    """Persist embeddings to LakeFS for debugging and recovery.
+
+    Stores the embedding vectors alongside their references. Note that
+    embeddings are large (1024 floats per record), so this is primarily
+    for recovery/debugging rather than routine access.
+
+    Args:
+        context: Dagster execution context for logging.
+        config: Pipeline configuration (is_trial for path selection).
+        speech_embeddings: Tuple of (DataFrame, embeddings list).
+        lakefs: LakeFS resource for data versioning.
+
+    Returns:
+        Dictionary with storage metadata.
+    """
+    from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
+
+    df, embeddings = speech_embeddings
+
+    # Create DataFrame with embeddings
+    embedding_records: list[dict[str, object]] = []
+    for i, row in enumerate(df.iter_rows(named=True)):
+        embedding_records.append(
+            {
+                "reference": row["reference"],
+                "embedding": embeddings[i],
+            }
+        )
+    df_snapshot = pl.DataFrame(embedding_records)
+
+    # Serialize to Parquet
+    buffer = io.BytesIO()
+    df_snapshot.write_parquet(buffer)
+    parquet_bytes = buffer.getvalue()
+
+    # Get LakeFS client
+    lakefs_client = lakefs.get_client()
+
+    # Upload to LakeFS intermediate path
+    if config.is_trial:
+        path = "central-bank-speeches/trial/intermediate/embeddings.parquet"
+    else:
+        path = "central-bank-speeches/intermediate/embeddings.parquet"
+
+    lakefs_client.objects_api.upload_object(
+        repository="data",
+        branch="main",
+        path=path,
+        content=parquet_bytes,
+    )
+
+    # Create commit
+    commit_id = None
+    try:
+        commit = lakefs_client.commits_api.commit(
+            repository="data",
+            branch="main",
+            commit_creation=CommitCreation(
+                message=f"Snapshot: embeddings ({len(df_snapshot)} records, {len(embeddings[0])}d)",
+                metadata={
+                    "dagster_run_id": context.run_id or "",
+                    "snapshot_type": "embeddings",
+                    "num_records": str(len(df_snapshot)),
+                    "dimensions": str(len(embeddings[0])),
+                },
+                date=None,
+                allow_empty=False,
+            ),
+        )
+        commit_id = commit.id
+        context.log.info(f"Embeddings snapshot committed: {commit_id}")
+    except Exception as e:
+        if "no changes" in str(e).lower():
+            context.log.info("No changes to commit (snapshot already exists)")
+        else:
+            raise
+
+    context.log.info(
+        f"Embeddings snapshot: {len(df_snapshot)} vectors, {len(embeddings[0])} dimensions"
+    )
+    context.log.info(f"Snapshot size: {len(parquet_bytes) / 1024 / 1024:.1f} MB")
+
+    return {
+        "path": f"lakefs://data/main/{path}",
+        "commit_id": commit_id,
+        "num_records": len(df_snapshot),
+        "dimensions": len(embeddings[0]),
+        "size_mb": len(parquet_bytes) / 1024 / 1024,
+    }
+
+
 # Export all central bank speech assets
 central_bank_speeches_assets = [
     raw_speeches,
@@ -900,4 +1254,8 @@ central_bank_speeches_assets = [
     enriched_speeches,
     speeches_data_product,
     weaviate_index,
+    # Intermediate snapshots for debugging/recovery
+    classification_snapshot,
+    summaries_snapshot,
+    embeddings_snapshot,
 ]

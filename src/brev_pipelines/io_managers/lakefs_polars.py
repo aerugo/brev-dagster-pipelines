@@ -7,15 +7,14 @@ Follows INV-D002 (LakeFS for Data Versioning) and INV-D003 (Parquet for Structur
 from __future__ import annotations
 
 import io
-from typing import TYPE_CHECKING
 
 import polars as pl
 from dagster import ConfigurableIOManager, InputContext, OutputContext
 from pydantic import Field
 
-if TYPE_CHECKING:
-    from brev_pipelines.resources.lakefs import LakeFSResource
-    from brev_pipelines.resources.minio import MinIOResource
+# Import at runtime - Dagster ConfigurableIOManager needs actual type for validation
+from brev_pipelines.resources.lakefs import LakeFSResource
+from brev_pipelines.resources.minio import MinIOResource
 
 
 class LakeFSPolarsIOManager(ConfigurableIOManager):
@@ -76,7 +75,7 @@ class LakeFSPolarsIOManager(ConfigurableIOManager):
         if context.run_id:
             commit_message += f" (Dagster run: {context.run_id[:8]})"
 
-        from lakefs_sdk.models import CommitCreation
+        from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
 
         lakefs_client.commits_api.commit(
             repository=self.repository,
@@ -89,6 +88,8 @@ class LakeFSPolarsIOManager(ConfigurableIOManager):
                     "num_rows": str(len(obj)),
                     "num_columns": str(len(obj.columns)),
                 },
+                date=None,
+                allow_empty=False,
             ),
         )
 
@@ -119,8 +120,8 @@ class LakeFSPolarsIOManager(ConfigurableIOManager):
             path=path,
         )
 
-        # Parse Parquet to DataFrame
-        df = pl.read_parquet(io.BytesIO(response.read()))
+        # Parse Parquet to DataFrame (response is a bytearray)
+        df = pl.read_parquet(io.BytesIO(response))
         context.log.info(
             f"Loaded {len(df)} rows from lakefs://{self.repository}/{self.branch}/{path}"
         )

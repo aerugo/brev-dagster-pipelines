@@ -26,7 +26,7 @@ GPU Orchestration (Automatic via KAI):
 
 import io
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import dagster as dg
@@ -39,21 +39,36 @@ from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.nim_embedding import NIMEmbeddingResource
 from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
 from brev_pipelines.resources.weaviate import WeaviateResource
+from brev_pipelines.types import SafeSynthConfig, WeaviatePropertyDef
 
 # Weaviate schema for synthetic speeches (summary-based, no full text)
-SYNTHETIC_SCHEMA: list[dict[str, str]] = [
-    {"name": "reference", "type": "text", "description": "Unique identifier (SYNTH-XXXXXX)"},
-    {"name": "date", "type": "text", "description": "Speech date (ISO format)"},
-    {"name": "central_bank", "type": "text", "description": "Issuing institution"},
-    {"name": "speaker", "type": "text", "description": "Speaker name"},
-    {"name": "title", "type": "text", "description": "Speech title"},
-    {"name": "summary", "type": "text", "description": "Compact summary (~1000 chars, synthesized)"},
-    {"name": "monetary_stance", "type": "int", "description": "1=very_dovish to 5=very_hawkish"},
-    {"name": "trade_stance", "type": "int", "description": "1=very_protectionist to 5=very_globalist"},
-    {"name": "tariff_mention", "type": "boolean", "description": "Contains tariff discussion"},
-    {"name": "economic_outlook", "type": "int", "description": "1=very_negative to 5=very_positive"},
-    {"name": "is_governor", "type": "boolean", "description": "Speaker is central bank governor"},
-    {"name": "is_synthetic", "type": "boolean", "description": "Synthetic data marker"},
+SYNTHETIC_SCHEMA: list[WeaviatePropertyDef] = [
+    WeaviatePropertyDef(
+        name="reference", type="text", description="Unique identifier (SYNTH-XXXXXX)"
+    ),
+    WeaviatePropertyDef(name="date", type="text", description="Speech date (ISO format)"),
+    WeaviatePropertyDef(name="central_bank", type="text", description="Issuing institution"),
+    WeaviatePropertyDef(name="speaker", type="text", description="Speaker name"),
+    WeaviatePropertyDef(name="title", type="text", description="Speech title"),
+    WeaviatePropertyDef(
+        name="summary", type="text", description="Compact summary (~1000 chars, synthesized)"
+    ),
+    WeaviatePropertyDef(
+        name="monetary_stance", type="int", description="1=very_dovish to 5=very_hawkish"
+    ),
+    WeaviatePropertyDef(
+        name="trade_stance", type="int", description="1=very_protectionist to 5=very_globalist"
+    ),
+    WeaviatePropertyDef(
+        name="tariff_mention", type="boolean", description="Contains tariff discussion"
+    ),
+    WeaviatePropertyDef(
+        name="economic_outlook", type="int", description="1=very_negative to 5=very_positive"
+    ),
+    WeaviatePropertyDef(
+        name="is_governor", type="boolean", description="Speaker is central bank governor"
+    ),
+    WeaviatePropertyDef(name="is_synthetic", type="boolean", description="Synthetic data marker"),
 ]
 
 
@@ -107,7 +122,13 @@ def enriched_data_for_synthesis(
     context.log.info(f"Loaded {len(df)} enriched speeches from LakeFS")
 
     # Verify required columns exist
-    required_columns = ["reference", "summary", "monetary_stance", "trade_stance", "economic_outlook"]
+    required_columns = [
+        "reference",
+        "summary",
+        "monetary_stance",
+        "trade_stance",
+        "economic_outlook",
+    ]
     missing = [c for c in required_columns if c not in df.columns]
     if missing:
         raise ValueError(
@@ -180,7 +201,7 @@ def synthetic_summaries(
         Tuple of (synthetic metadata+summary DataFrame, evaluation report).
     """
     df = enriched_data_for_synthesis
-    run_id = context.run_id or datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    run_id = context.run_id or datetime.now(UTC).strftime("%Y%m%d%H%M%S")
 
     context.log.info("Starting synthetic data generation with KAI GPU orchestration...")
     context.log.info("Training on METADATA + CLASSIFICATIONS + COMPACT SUMMARIES")
@@ -190,19 +211,19 @@ def synthetic_summaries(
     # Compact summaries (~1000 chars) capture semantic nuance beyond numeric classifications.
     # Full text is excluded (GPT-OSS expands summaries during speech generation step).
     synthesis_columns = [
-        "reference",           # Unique identifier
-        "date",                # Speech date
-        "central_bank",        # Institution name (short string)
-        "speaker",             # Speaker name (short string)
-        "title",               # Speech title (short string)
+        "reference",  # Unique identifier
+        "date",  # Speech date
+        "central_bank",  # Institution name (short string)
+        "speaker",  # Speaker name (short string)
+        "title",  # Speech title (short string)
         # Classifications from ETL pipeline - capture overall stance numerically
-        "monetary_stance",     # 1-5 scale (dovish to hawkish)
-        "trade_stance",        # 1-5 scale (protectionist to globalist)
-        "economic_outlook",    # 1-5 scale (negative to positive)
-        "tariff_mention",      # Binary 0/1
-        "is_governor",         # Binary 0/1
+        "monetary_stance",  # 1-5 scale (dovish to hawkish)
+        "trade_stance",  # 1-5 scale (protectionist to globalist)
+        "economic_outlook",  # 1-5 scale (negative to positive)
+        "tariff_mention",  # Binary 0/1
+        "is_governor",  # Binary 0/1
         # Compact summary - captures specific details beyond numeric classifications
-        "summary",             # ~1000 chars, bullet-point format (fits in context)
+        "summary",  # ~1000 chars, bullet-point format (fits in context)
         # EXCLUDED: "text" - full speech text, way too long (~20000+ chars)
     ]
 
@@ -231,12 +252,14 @@ def synthetic_summaries(
     data_for_synthesis = df_for_synthesis.to_dicts()
 
     context.log.info(f"Training on {len(data_for_synthesis)} records")
-    context.log.info("Summaries + classifications provide semantic content for embedding and search")
+    context.log.info(
+        "Summaries + classifications provide semantic content for embedding and search"
+    )
 
     # Build Safe Synthesizer config based on dataset size
     # Per documentation: holdout requires 200+ records, recommended to disable for <500
     num_records = len(data_for_synthesis)
-    synth_config: dict[str, Any] = {
+    synth_config: SafeSynthConfig = {
         "epsilon": 6.0,  # Recommended 4-12 for large datasets
         "piiReplacement": True,
         "runMiaEvaluation": True,
@@ -271,9 +294,7 @@ def synthetic_summaries(
     synthetic_df = synthetic_df.with_row_index("_row_idx")
     synthetic_df = synthetic_df.with_columns(
         [
-            (pl.lit("SYNTH-") + pl.col("_row_idx").cast(pl.Utf8).str.zfill(6)).alias(
-                "reference"
-            ),
+            (pl.lit("SYNTH-") + pl.col("_row_idx").cast(pl.Utf8).str.zfill(6)).alias("reference"),
             pl.lit(True).alias("is_synthetic"),
         ]
     )
@@ -281,7 +302,9 @@ def synthetic_summaries(
 
     # Log synthetic classification distributions
     if "monetary_stance" in synthetic_df.columns:
-        context.log.info(f"Synthetic monetary stance: {synthetic_df['monetary_stance'].value_counts()}")
+        context.log.info(
+            f"Synthetic monetary stance: {synthetic_df['monetary_stance'].value_counts()}"
+        )
     if "trade_stance" in synthetic_df.columns:
         context.log.info(f"Synthetic trade stance: {synthetic_df['trade_stance'].value_counts()}")
 
@@ -293,7 +316,7 @@ def synthetic_summaries(
         "quality_score": evaluation.get("quality_score") or 0,
         "privacy_passed": evaluation.get("privacy_passed", False),
         "job_id": evaluation.get("job_id", ""),
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "gpu_orchestration": "KAI priority-based preemption",
         "synthesis_type": "metadata-classification-summary-based",
         "synthesis_columns": available_columns,
@@ -308,9 +331,13 @@ def synthetic_summaries(
         },
     }
 
-    context.log.info(f"Generated {len(synthetic_df)} synthetic records (metadata + classifications + summaries)")
+    context.log.info(
+        f"Generated {len(synthetic_df)} synthetic records (metadata + classifications + summaries)"
+    )
     context.log.info(f"Privacy passed: {combined_evaluation['privacy_passed']}")
-    context.log.info(f"MIA score: {combined_evaluation['mia_score']}, AIA score: {combined_evaluation['aia_score']}")
+    context.log.info(
+        f"MIA score: {combined_evaluation['mia_score']}, AIA score: {combined_evaluation['aia_score']}"
+    )
 
     return (synthetic_df, combined_evaluation)
 
@@ -342,7 +369,7 @@ def synthetic_validation_report(
     Returns:
         Validation report dictionary with privacy metrics.
     """
-    from lakefs_sdk.models import CommitCreation
+    from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
 
     _, evaluation = synthetic_summaries
 
@@ -401,6 +428,8 @@ def synthetic_validation_report(
                     "synthesis_type": "summary-based",
                     "html_report_available": str(report.get("html_report_available", False)),
                 },
+                date=None,
+                allow_empty=False,
             ),
         )
     except Exception as e:
@@ -455,14 +484,16 @@ def synthetic_embeddings(
 
     # Load existing checkpoint
     existing_checkpoint = checkpoint_mgr.load()
-    processed_refs = set()
+    processed_refs: set[str] = set()
     if existing_checkpoint is not None:
         processed_refs = set(existing_checkpoint["reference"].to_list())
         context.log.info(f"Loaded checkpoint with {len(processed_refs)} embeddings")
 
     # Filter to unprocessed rows
     to_process = df.filter(~pl.col("reference").is_in(list(processed_refs)))
-    context.log.info(f"Processing {len(to_process)} remaining rows (skipping {len(processed_refs)} already done)")
+    context.log.info(
+        f"Processing {len(to_process)} remaining rows (skipping {len(processed_refs)} already done)"
+    )
 
     # Process in batches with checkpointing
     batch_size = 32
@@ -472,7 +503,7 @@ def synthetic_embeddings(
         batch = rows[i : i + batch_size]
 
         # Prepare texts for this batch
-        texts = []
+        texts: list[str] = []
         for row in batch:
             title = row.get("title", "") or ""
             summary = row.get("summary", "") or ""
@@ -484,10 +515,15 @@ def synthetic_embeddings(
 
         # Save to checkpoint
         for j, row in enumerate(batch):
-            checkpoint_mgr.save_batch([{
-                "reference": row["reference"],
-                "embedding": batch_embeddings[j],
-            }], force=(j == len(batch) - 1))  # Force save at end of batch
+            checkpoint_mgr.save_batch(
+                [
+                    {
+                        "reference": row["reference"],
+                        "embedding": batch_embeddings[j],
+                    }
+                ],
+                force=(j == len(batch) - 1),
+            )  # Force save at end of batch
 
         context.log.info(f"Checkpoint saved: {checkpoint_mgr.processed_count} embeddings complete")
 
@@ -498,11 +534,12 @@ def synthetic_embeddings(
     checkpoint_mgr.cleanup()
 
     # Build embeddings list in DataFrame order
-    embedding_map = {}
-    for row in final_checkpoint.to_dicts():
-        embedding_map[row["reference"]] = row["embedding"]
+    embedding_map: dict[str, list[float]] = {}
+    if final_checkpoint is not None:
+        for row in final_checkpoint.to_dicts():
+            embedding_map[row["reference"]] = row["embedding"]
 
-    embeddings = []
+    embeddings: list[list[float]] = []
     for row in df.iter_rows(named=True):
         ref = row["reference"]
         if ref in embedding_map:
@@ -547,14 +584,12 @@ def synthetic_data_product(
     Returns:
         Dictionary with storage metadata (path, commit_id, counts).
     """
-    from lakefs_sdk.models import CommitCreation
+    from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
 
     df, _ = synthetic_summaries
 
     # Add timestamp
-    df = df.with_columns(
-        pl.lit(datetime.now(timezone.utc).isoformat()).alias("generated_at")
-    )
+    df = df.with_columns(pl.lit(datetime.now(UTC).isoformat()).alias("generated_at"))
 
     # Serialize to Parquet
     buffer = io.BytesIO()
@@ -589,6 +624,8 @@ def synthetic_data_product(
                     "is_synthetic": "true",
                     "synthesis_type": "summary-based",
                 },
+                date=None,
+                allow_empty=False,
             ),
         )
         commit_id = commit.id
@@ -679,12 +716,207 @@ def synthetic_weaviate_index(
         vectors=embeddings,
     )
 
-    context.log.info(f"Indexed {count} synthetic summaries in Weaviate collection: {collection_name}")
+    context.log.info(
+        f"Indexed {count} synthetic summaries in Weaviate collection: {collection_name}"
+    )
 
     return {
         "collection": collection_name,
         "object_count": count,
         "vector_dimensions": len(embeddings[0]),
+    }
+
+
+# ============================================================================
+# INTERMEDIATE SNAPSHOTS - Persist intermediate stages to LakeFS
+# ============================================================================
+
+
+@dg.asset(
+    description="Snapshot of synthetic summaries in LakeFS",
+    group_name="synthetic_speeches",
+    metadata={
+        "layer": "intermediate",
+        "destination": "lakefs",
+    },
+)
+def synthetic_summaries_snapshot(
+    context: dg.AssetExecutionContext,
+    config: PipelineConfig,
+    synthetic_summaries: tuple[pl.DataFrame, dict[str, Any]],
+    lakefs: LakeFSResource,
+) -> dict[str, Any]:
+    """Persist synthetic summaries to LakeFS for debugging and recovery.
+
+    Stores the Safe Synthesizer generated summaries with their metadata.
+
+    Args:
+        context: Dagster execution context for logging.
+        config: Pipeline configuration (is_trial for path selection).
+        synthetic_summaries: Tuple of (DataFrame, evaluation metrics).
+        lakefs: LakeFS resource for data versioning.
+
+    Returns:
+        Dictionary with storage metadata.
+    """
+    from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
+
+    df, evaluation = synthetic_summaries
+
+    # Serialize to Parquet
+    buffer = io.BytesIO()
+    df.write_parquet(buffer)
+    parquet_bytes = buffer.getvalue()
+
+    # Get LakeFS client
+    lakefs_client = lakefs.get_client()
+
+    # Upload to LakeFS intermediate path
+    if config.is_trial:
+        path = "synthetic-speeches/trial/intermediate/summaries.parquet"
+    else:
+        path = "synthetic-speeches/intermediate/summaries.parquet"
+
+    lakefs_client.objects_api.upload_object(
+        repository="data",
+        branch="main",
+        path=path,
+        content=parquet_bytes,
+    )
+
+    # Create commit
+    commit_id = None
+    try:
+        commit = lakefs_client.commits_api.commit(
+            repository="data",
+            branch="main",
+            commit_creation=CommitCreation(
+                message=f"Snapshot: synthetic summaries ({len(df)} records)",
+                metadata={
+                    "dagster_run_id": context.run_id or "",
+                    "snapshot_type": "synthetic_summaries",
+                    "num_records": str(len(df)),
+                },
+                date=None,
+                allow_empty=False,
+            ),
+        )
+        commit_id = commit.id
+        context.log.info(f"Synthetic summaries snapshot committed: {commit_id}")
+    except Exception as e:
+        if "no changes" in str(e).lower():
+            context.log.info("No changes to commit (snapshot already exists)")
+        else:
+            raise
+
+    context.log.info(f"Synthetic summaries snapshot: {len(df)} records")
+
+    return {
+        "path": f"lakefs://data/main/{path}",
+        "commit_id": commit_id,
+        "num_records": len(df),
+        "evaluation": evaluation,
+    }
+
+
+@dg.asset(
+    description="Snapshot of synthetic embeddings in LakeFS",
+    group_name="synthetic_speeches",
+    metadata={
+        "layer": "intermediate",
+        "destination": "lakefs",
+    },
+)
+def synthetic_embeddings_snapshot(
+    context: dg.AssetExecutionContext,
+    config: PipelineConfig,
+    synthetic_embeddings: tuple[pl.DataFrame, list[list[float]]],
+    lakefs: LakeFSResource,
+) -> dict[str, Any]:
+    """Persist synthetic embeddings to LakeFS for debugging and recovery.
+
+    Stores the embedding vectors alongside their references.
+
+    Args:
+        context: Dagster execution context for logging.
+        config: Pipeline configuration (is_trial for path selection).
+        synthetic_embeddings: Tuple of (DataFrame, embeddings list).
+        lakefs: LakeFS resource for data versioning.
+
+    Returns:
+        Dictionary with storage metadata.
+    """
+    from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
+
+    df, embeddings = synthetic_embeddings
+
+    # Create DataFrame with embeddings
+    embedding_records: list[dict[str, object]] = []
+    for i, row in enumerate(df.iter_rows(named=True)):
+        embedding_records.append(
+            {
+                "reference": row["reference"],
+                "embedding": embeddings[i],
+            }
+        )
+    df_snapshot = pl.DataFrame(embedding_records)
+
+    # Serialize to Parquet
+    buffer = io.BytesIO()
+    df_snapshot.write_parquet(buffer)
+    parquet_bytes = buffer.getvalue()
+
+    # Get LakeFS client
+    lakefs_client = lakefs.get_client()
+
+    # Upload to LakeFS intermediate path
+    if config.is_trial:
+        path = "synthetic-speeches/trial/intermediate/embeddings.parquet"
+    else:
+        path = "synthetic-speeches/intermediate/embeddings.parquet"
+
+    lakefs_client.objects_api.upload_object(
+        repository="data",
+        branch="main",
+        path=path,
+        content=parquet_bytes,
+    )
+
+    # Create commit
+    commit_id = None
+    try:
+        commit = lakefs_client.commits_api.commit(
+            repository="data",
+            branch="main",
+            commit_creation=CommitCreation(
+                message=f"Snapshot: synthetic embeddings ({len(df_snapshot)} records, {len(embeddings[0])}d)",
+                metadata={
+                    "dagster_run_id": context.run_id or "",
+                    "snapshot_type": "synthetic_embeddings",
+                    "num_records": str(len(df_snapshot)),
+                    "dimensions": str(len(embeddings[0])),
+                },
+                date=None,
+                allow_empty=False,
+            ),
+        )
+        commit_id = commit.id
+        context.log.info(f"Synthetic embeddings snapshot committed: {commit_id}")
+    except Exception as e:
+        if "no changes" in str(e).lower():
+            context.log.info("No changes to commit (snapshot already exists)")
+        else:
+            raise
+
+    context.log.info(f"Synthetic embeddings snapshot: {len(df_snapshot)} vectors")
+    context.log.info(f"Snapshot size: {len(parquet_bytes) / 1024 / 1024:.1f} MB")
+
+    return {
+        "path": f"lakefs://data/main/{path}",
+        "commit_id": commit_id,
+        "num_records": len(df_snapshot),
+        "dimensions": len(embeddings[0]),
+        "size_mb": len(parquet_bytes) / 1024 / 1024,
     }
 
 
@@ -696,4 +928,7 @@ synthetic_speeches_assets = [
     synthetic_embeddings,
     synthetic_data_product,
     synthetic_weaviate_index,
+    # Intermediate snapshots for debugging/recovery
+    synthetic_summaries_snapshot,
+    synthetic_embeddings_snapshot,
 ]

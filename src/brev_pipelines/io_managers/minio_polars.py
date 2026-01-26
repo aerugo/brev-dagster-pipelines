@@ -10,14 +10,13 @@ Follows INV-D003 (Parquet for Structured Data).
 from __future__ import annotations
 
 import io
-from typing import TYPE_CHECKING
 
 import polars as pl
 from dagster import ConfigurableIOManager, InputContext, OutputContext
 from pydantic import Field
 
-if TYPE_CHECKING:
-    from brev_pipelines.resources.minio import MinIOResource
+# Import at runtime - Dagster ConfigurableIOManager needs actual type for validation
+from brev_pipelines.resources.minio import MinIOResource
 
 
 class MinIOPolarsIOManager(ConfigurableIOManager):
@@ -72,9 +71,7 @@ class MinIOPolarsIOManager(ConfigurableIOManager):
             content_type="application/octet-stream",
         )
 
-        context.log.info(
-            f"Stored {len(obj)} rows to minio://{self.bucket}/{path}"
-        )
+        context.log.info(f"Stored {len(obj)} rows to minio://{self.bucket}/{path}")
 
     def load_input(self, context: InputContext) -> pl.DataFrame:
         """Load a Polars DataFrame from MinIO Parquet file.
@@ -101,7 +98,5 @@ class MinIOPolarsIOManager(ConfigurableIOManager):
 
         # Parse Parquet to DataFrame
         df = pl.read_parquet(io.BytesIO(data))
-        context.log.info(
-            f"Loaded {len(df)} rows from minio://{self.bucket}/{path}"
-        )
+        context.log.info(f"Loaded {len(df)} rows from minio://{self.bucket}/{path}")
         return df

@@ -10,6 +10,7 @@ import io
 
 import polars as pl
 from dagster import ConfigurableIOManager, InputContext, OutputContext
+from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
 from pydantic import Field
 
 # Import at runtime - Dagster ConfigurableIOManager needs actual type for validation
@@ -70,32 +71,38 @@ class LakeFSPolarsIOManager(ConfigurableIOManager):
             content=parquet_bytes,
         )
 
-        # Create commit
+        # Create commit - handle case where data hasn't changed
         commit_message = f"Update {asset_key} data product"
         if context.run_id:
             commit_message += f" (Dagster run: {context.run_id[:8]})"
 
-        from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
-
-        lakefs_client.commits_api.commit(
-            repository=self.repository,
-            branch=self.branch,
-            commit_creation=CommitCreation(
-                message=commit_message,
-                metadata={
-                    "dagster_run_id": context.run_id or "",
-                    "asset_key": asset_key,
-                    "num_rows": str(len(obj)),
-                    "num_columns": str(len(obj.columns)),
-                },
-                date=None,
-                allow_empty=False,
-            ),
-        )
-
-        context.log.info(
-            f"Stored {len(obj)} rows to lakefs://{self.repository}/{self.branch}/{path}"
-        )
+        try:
+            lakefs_client.commits_api.commit(
+                repository=self.repository,
+                branch=self.branch,
+                commit_creation=CommitCreation(
+                    message=commit_message,
+                    metadata={
+                        "dagster_run_id": context.run_id or "",
+                        "asset_key": asset_key,
+                        "num_rows": str(len(obj)),
+                        "num_columns": str(len(obj.columns)),
+                    },
+                    date=None,
+                    allow_empty=False,
+                ),
+            )
+            context.log.info(
+                f"Stored {len(obj)} rows to lakefs://{self.repository}/{self.branch}/{path}"
+            )
+        except Exception as e:
+            # LakeFS returns error when there are no changes to commit
+            if "no changes" in str(e).lower():
+                context.log.info(
+                    f"No changes to commit for {asset_key} (data unchanged)"
+                )
+            else:
+                raise
 
     def load_input(self, context: InputContext) -> pl.DataFrame:
         """Load a Polars DataFrame from LakeFS Parquet file.

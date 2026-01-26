@@ -617,6 +617,57 @@ class LLMAssetMetadata(TypedDict):
 
 
 # =============================================================================
+# LLM Checkpoint Types
+# =============================================================================
+
+
+class CheckpointRecordBase(TypedDict, total=False):
+    """Base fields for all checkpoint records.
+
+    All checkpoint records must have a reference field for identification.
+    LLM status fields track processing results.
+    """
+
+    reference: str  # Required - unique record identifier
+    _llm_status: str  # 'success' or 'failed'
+    _llm_error: str | None  # Error message if failed
+    _llm_attempts: int  # Number of retry attempts
+    _llm_fallback_used: bool  # Whether fallback value was used
+
+
+class ClassificationCheckpointRecord(CheckpointRecordBase):
+    """Checkpoint record for classification LLM results.
+
+    Used by speech_classifications asset to checkpoint classification progress.
+    """
+
+    monetary_stance: int  # 1-5 scale
+    trade_stance: int  # 1-5 scale
+    tariff_mention: int  # 0 or 1
+    economic_outlook: int  # 1-5 scale
+
+
+class SummaryCheckpointRecord(CheckpointRecordBase):
+    """Checkpoint record for summary LLM results.
+
+    Used by speech_summaries asset to checkpoint summary progress.
+    """
+
+    summary: str  # Generated summary text
+
+
+class EmbeddingCheckpointRecord(TypedDict, total=False):
+    """Checkpoint record for embedding results.
+
+    Note: Does not extend CheckpointRecordBase since embeddings
+    don't go through LLM retry wrapper.
+    """
+
+    reference: str  # Required - unique record identifier
+    embedding: list[float]  # Embedding vector
+
+
+# =============================================================================
 # Type Aliases
 # =============================================================================
 

@@ -601,9 +601,7 @@ Classification:"""
     avg_attempts = df.select(pl.col("_llm_attempts").mean()).item() or 1.0
 
     # Get failed references (limit to 100)
-    failed_refs = (
-        failed_df["reference"].to_list()[:100] if failed_count > 0 else []
-    )
+    failed_refs = failed_df["reference"].to_list()[:100] if failed_count > 0 else []
 
     # Build metadata
     metadata: LLMAssetMetadata = {
@@ -647,9 +645,7 @@ Classification:"""
             if count > 0:
                 context.log.info(f"  {error_type}: {count}")
         context.log.info("-" * 40)
-        context.log.warning(
-            f"Failed references (first 10): {metadata['failed_references'][:10]}"
-        )
+        context.log.warning(f"Failed references (first 10): {metadata['failed_references'][:10]}")
 
     context.log.info("=" * 60)
 
@@ -842,9 +838,7 @@ Generate a COMPACT bullet-point summary (under 1000 characters total):"""
     avg_attempts = results_df.select(pl.col("_llm_attempts").mean()).item() or 1.0
 
     # Get failed references (limit to 100)
-    failed_refs = (
-        failed_df["reference"].to_list()[:100] if failed_count > 0 else []
-    )
+    failed_refs = failed_df["reference"].to_list()[:100] if failed_count > 0 else []
 
     # Add metadata to Dagster context (single call - Dagster limitation)
     output_metadata: dict[str, object] = {
@@ -888,9 +882,7 @@ Generate a COMPACT bullet-point summary (under 1000 characters total):"""
     avg_len = sum(summary_lengths) / len(summary_lengths) if summary_lengths else 0
     max_len = max(summary_lengths) if summary_lengths else 0
     min_len = min(summary_lengths) if summary_lengths else 0
-    context.log.info(
-        f"Summary lengths: avg={avg_len:.0f} chars, min={min_len}, max={max_len}"
-    )
+    context.log.info(f"Summary lengths: avg={avg_len:.0f} chars, min={min_len}, max={max_len}")
 
     return results_df
 
@@ -926,18 +918,55 @@ def enriched_speeches(
     df_with_embeddings, _ = speech_embeddings
     df_with_classification = speech_classification
 
-    # Join classification results (monetary_stance, trade_stance, tariff_mention, economic_outlook)
+    # Join classification results with dead letter columns (renamed with _class suffix)
+    classification_cols = [
+        "reference",
+        "monetary_stance",
+        "trade_stance",
+        "tariff_mention",
+        "economic_outlook",
+        "_llm_status",
+        "_llm_error",
+        "_llm_attempts",
+        "_llm_fallback_used",
+    ]
+    df_classification_renamed = df_with_classification.select(
+        [c for c in classification_cols if c in df_with_classification.columns]
+    ).rename(
+        {
+            "_llm_status": "_llm_status_class",
+            "_llm_error": "_llm_error_class",
+            "_llm_attempts": "_llm_attempts_class",
+            "_llm_fallback_used": "_llm_fallback_class",
+        }
+    )
     df = df_with_embeddings.join(
-        df_with_classification.select(
-            ["reference", "monetary_stance", "trade_stance", "tariff_mention", "economic_outlook"]
-        ),
+        df_classification_renamed,
         on="reference",
         how="left",
     )
 
-    # Join summaries
+    # Join summaries with dead letter columns (renamed with _summary suffix)
+    summary_cols = [
+        "reference",
+        "summary",
+        "_llm_status",
+        "_llm_error",
+        "_llm_attempts",
+        "_llm_fallback_used",
+    ]
+    df_summaries_renamed = speech_summaries.select(
+        [c for c in summary_cols if c in speech_summaries.columns]
+    ).rename(
+        {
+            "_llm_status": "_llm_status_summary",
+            "_llm_error": "_llm_error_summary",
+            "_llm_attempts": "_llm_attempts_summary",
+            "_llm_fallback_used": "_llm_fallback_summary",
+        }
+    )
     df = df.join(
-        speech_summaries.select(["reference", "summary"]),
+        df_summaries_renamed,
         on="reference",
         how="left",
     )
@@ -1185,13 +1214,17 @@ def classification_snapshot(
 
     df = speech_classification
 
-    # Select only classification-relevant columns
+    # Select classification columns including dead letter tracking
     classification_cols = [
         "reference",
         "monetary_stance",
         "trade_stance",
         "tariff_mention",
         "economic_outlook",
+        "_llm_status",
+        "_llm_error",
+        "_llm_attempts",
+        "_llm_fallback_used",
     ]
     df_snapshot = df.select([c for c in classification_cols if c in df.columns])
 
@@ -1288,8 +1321,16 @@ def summaries_snapshot(
 
     df = speech_summaries
 
-    # Select only summary-relevant columns
-    df_snapshot = df.select(["reference", "summary"])
+    # Select summary columns including dead letter tracking
+    summary_cols = [
+        "reference",
+        "summary",
+        "_llm_status",
+        "_llm_error",
+        "_llm_attempts",
+        "_llm_fallback_used",
+    ]
+    df_snapshot = df.select([c for c in summary_cols if c in df.columns])
 
     # Serialize to Parquet
     buffer = io.BytesIO()

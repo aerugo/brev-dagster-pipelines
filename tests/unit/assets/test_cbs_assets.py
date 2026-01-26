@@ -189,7 +189,7 @@ class TestEnrichedSpeeches:
 
     @pytest.fixture
     def sample_classification_df(self) -> pl.DataFrame:
-        """Create sample classification results."""
+        """Create sample classification results with dead letter columns."""
         return pl.DataFrame(
             {
                 "reference": ["BIS_001", "BIS_002", "BIS_003"],
@@ -197,12 +197,16 @@ class TestEnrichedSpeeches:
                 "trade_stance": [3, 5, 1],
                 "tariff_mention": [0, 1, 0],
                 "economic_outlook": [4, 3, 2],
+                "_llm_status": ["success", "success", "success"],
+                "_llm_error": [None, None, None],
+                "_llm_attempts": [1, 1, 1],
+                "_llm_fallback_used": [False, False, False],
             }
         )
 
     @pytest.fixture
     def sample_summaries_df(self) -> pl.DataFrame:
-        """Create sample summaries results."""
+        """Create sample summaries results with dead letter columns."""
         return pl.DataFrame(
             {
                 "reference": ["BIS_001", "BIS_002", "BIS_003"],
@@ -211,6 +215,10 @@ class TestEnrichedSpeeches:
                     "Summary of speech 2",
                     "Summary of speech 3",
                 ],
+                "_llm_status": ["success", "success", "success"],
+                "_llm_error": [None, None, None],
+                "_llm_attempts": [1, 1, 1],
+                "_llm_fallback_used": [False, False, False],
             }
         )
 
@@ -888,7 +896,7 @@ class TestSpeechClassification:
         mock_minio_for_checkpoint: MagicMock,
     ) -> None:
         """Test speech_classification classifies all speeches."""
-        # Create expected results DataFrame
+        # Create expected results DataFrame with dead letter columns
         results_df = pl.DataFrame(
             {
                 "reference": ["BIS_001", "BIS_002"],
@@ -896,6 +904,10 @@ class TestSpeechClassification:
                 "trade_stance": [3, 3],
                 "tariff_mention": [0, 0],
                 "economic_outlook": [3, 3],
+                "_llm_status": ["success", "success"],
+                "_llm_error": [None, None],
+                "_llm_attempts": [1, 1],
+                "_llm_fallback_used": [False, False],
             }
         )
 
@@ -968,7 +980,7 @@ class TestSpeechSummaries:
         mock_minio_for_checkpoint: MagicMock,
     ) -> None:
         """Test speech_summaries generates summaries for all speeches."""
-        # Create expected results DataFrame
+        # Create expected results DataFrame with dead letter columns
         results_df = pl.DataFrame(
             {
                 "reference": ["BIS_001", "BIS_002"],
@@ -976,6 +988,10 @@ class TestSpeechSummaries:
                     "* Inflation: 2.5% target\n* GDP growth: 2.1%",
                     "* Trade policy: balanced approach\n* Key risk: tariffs",
                 ],
+                "_llm_status": ["success", "success"],
+                "_llm_error": [None, None],
+                "_llm_attempts": [1, 1],
+                "_llm_fallback_used": [False, False],
             }
         )
 
@@ -1332,9 +1348,7 @@ class TestSpeechSummariesRetryBehavior:
         """Test successful summaries have status='success'."""
         mock_nim = MagicMock()
         summary_text = (
-            "• Inflation target: 2%\n"
-            "• GDP growth: moderate\n"
-            "• Key concern: labor market tightness"
+            "• Inflation target: 2%\n• GDP growth: moderate\n• Key concern: labor market tightness"
         )
         mock_nim.generate.return_value = summary_text
 

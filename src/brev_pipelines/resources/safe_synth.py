@@ -423,19 +423,22 @@ class SafeSynthesizerResource(ConfigurableResource):
         """
         # Check if already running
         already_running = self.health_check()
+        scaled_up = False
 
         # If service not available and mock fallback enabled, use mock
         if not already_running and self.use_mock_fallback:
             # Try to check if Kubernetes is available for scaling
             try:
                 self._scale_deployment(replicas=1)
+                scaled_up = True  # Track that we already scaled up
             except Exception:
                 # Kubernetes not available (local dev) - use mock synthesis
                 return self._generate_mock_synthetic_data(input_data, run_id)
 
         if not already_running:
             # Scale up deployment - KAI will preempt nim-llm
-            self._scale_deployment(replicas=1)
+            if not scaled_up:
+                self._scale_deployment(replicas=1)
             self._wait_for_ready(timeout=600)  # 10 min for model loading
 
         try:

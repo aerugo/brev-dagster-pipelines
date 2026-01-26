@@ -24,8 +24,6 @@ Trial Run Mode:
 """
 
 import io
-import json
-import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -35,11 +33,17 @@ import polars as pl
 from brev_pipelines.config import PipelineConfig
 from brev_pipelines.io_managers.checkpoint import LLMCheckpointManager, process_with_checkpoint
 from brev_pipelines.resources.lakefs import LakeFSResource
+from brev_pipelines.resources.llm_retry import (
+    RetryConfig,
+    retry_with_backoff,
+    validate_classification_response,
+    validate_summary_response,
+)
 from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.nim import NIMResource
 from brev_pipelines.resources.nim_embedding import NIMEmbeddingResource
 from brev_pipelines.resources.weaviate import WeaviateResource
-from brev_pipelines.types import WeaviatePropertyDef
+from brev_pipelines.types import SpeechClassification, WeaviatePropertyDef
 
 # Collection schema for Weaviate
 SPEECHES_SCHEMA: list[WeaviatePropertyDef] = [
@@ -450,9 +454,16 @@ def speech_classification(
         checkpoint_interval=10,
     )
 
+    # Retry configuration for LLM calls
+    retry_config = RetryConfig(
+        max_retries=5,
+        base_delay=1.0,
+        exponential_base=2.0,
+    )
+
     def classify_speech(row: dict[str, Any]) -> dict[str, Any]:
-        """Classify a single speech and return result dict."""
-        reference = row["reference"]
+        """Classify a single speech with retry logic and dead letter tracking."""
+        reference = str(row["reference"])
         text_excerpt = (row.get("text", "") or "")[:4000]
         title = row.get("title", "") or "Untitled"
         speaker = row.get("speaker", "") or "Unknown"
@@ -476,27 +487,40 @@ Respond with ONLY a JSON object in this exact format:
 
 Classification:"""
 
-        response = nim_reasoning.generate(prompt, max_tokens=150, temperature=0.1)
+        def get_fallback() -> SpeechClassification:
+            """Return neutral fallback values."""
+            return SpeechClassification(
+                monetary_stance=3,
+                trade_stance=3,
+                tariff_mention=0,
+                economic_outlook=3,
+            )
 
-        # Parse response with fallback to neutral values
-        monetary, trade, tariff, outlook = 3, 3, 0, 3
-        try:
-            json_match = re.search(r"\{[^}]+\}", response)
-            if json_match:
-                result = json.loads(json_match.group())
-                monetary = MONETARY_STANCE_SCALE.get(result.get("monetary_stance", "neutral"), 3)
-                trade = TRADE_STANCE_SCALE.get(result.get("trade_stance", "neutral"), 3)
-                tariff = int(result.get("tariff_mention", 0))
-                outlook = OUTLOOK_SCALE.get(result.get("economic_outlook", "neutral"), 3)
-        except Exception:
-            pass  # Keep defaults
+        # Execute with retry wrapper
+        result = retry_with_backoff(
+            fn=lambda: nim_reasoning.generate(prompt, max_tokens=150, temperature=0.1),
+            validate_fn=validate_classification_response,
+            record_id=reference,
+            fallback_fn=get_fallback,
+            config=retry_config,
+            logger=context.log,
+        )
+
+        # Get values (either parsed or fallback)
+        values = result.parsed_data if result.status == "success" else result.fallback_values
+        if values is None:
+            values = get_fallback()
 
         return {
             "reference": reference,
-            "monetary_stance": monetary,
-            "trade_stance": trade,
-            "tariff_mention": tariff,
-            "economic_outlook": outlook,
+            "monetary_stance": values["monetary_stance"],
+            "trade_stance": values["trade_stance"],
+            "tariff_mention": values["tariff_mention"],
+            "economic_outlook": values["economic_outlook"],
+            "_llm_status": result.status,
+            "_llm_error": result.error_message,
+            "_llm_attempts": result.attempts,
+            "_llm_fallback_used": result.fallback_used,
         }
 
     # Process with checkpointing
@@ -517,7 +541,7 @@ Classification:"""
         msg = "Classification checkpoint returned no results"
         raise RuntimeError(msg)
 
-    # Join results back to original DataFrame
+    # Join results back to original DataFrame (including dead letter columns)
     df = df.join(
         results_df.select(
             [
@@ -526,6 +550,10 @@ Classification:"""
                 pl.col("trade_stance").cast(pl.Int8),
                 pl.col("tariff_mention").cast(pl.Int8),
                 pl.col("economic_outlook").cast(pl.Int8),
+                pl.col("_llm_status").cast(pl.Utf8),
+                pl.col("_llm_error").cast(pl.Utf8),
+                pl.col("_llm_attempts").cast(pl.Int64),
+                pl.col("_llm_fallback_used").cast(pl.Boolean),
             ]
         ),
         on="reference",
@@ -533,6 +561,19 @@ Classification:"""
     )
 
     # Log classification statistics
+    total = len(df)
+    failed_count = df.filter(pl.col("_llm_status") == "failed").height
+    success_count = total - failed_count
+
+    context.log.info("Classification complete:")
+    context.log.info(f"  Total processed: {total}")
+    context.log.info(f"  Successful: {success_count} ({100*success_count/total:.1f}%)")
+    context.log.info(f"  Failed (using fallback): {failed_count} ({100*failed_count/total:.1f}%)")
+
+    if failed_count > 0:
+        failed_refs = df.filter(pl.col("_llm_status") == "failed")["reference"].to_list()[:10]
+        context.log.warning(f"  Failed references (first 10): {failed_refs}")
+
     context.log.info(f"Monetary stance distribution: {df['monetary_stance'].value_counts()}")
     context.log.info(f"Trade stance distribution: {df['trade_stance'].value_counts()}")
     tariff_count = df.filter(pl.col("tariff_mention") == 1).height
@@ -602,9 +643,16 @@ def speech_summaries(
         checkpoint_interval=10,
     )
 
+    # Retry configuration for LLM calls
+    retry_config = RetryConfig(
+        max_retries=5,
+        base_delay=1.0,
+        exponential_base=2.0,
+    )
+
     def summarize_speech(row: dict[str, Any]) -> dict[str, Any]:
-        """Generate summary for a single speech and return result dict."""
-        reference = row["reference"]
+        """Generate summary with retry logic and dead letter tracking."""
+        reference = str(row["reference"])
         title = row.get("title", "") or "Untitled"
         speaker = row.get("speaker", "") or "Unknown"
         central_bank = row.get("central_bank", "") or "Unknown"
@@ -632,17 +680,33 @@ Text excerpt:
 
 Generate a COMPACT bullet-point summary (under 1000 characters total):"""
 
-        summary = nim_reasoning.generate(prompt, max_tokens=400, temperature=0.2)
+        def get_fallback() -> str:
+            """Return fallback summary with basic info."""
+            return f"• Topic: {title[:100]}\n• Speaker: {speaker}\n• Bank: {central_bank}"
 
-        # Handle LLM errors with fallback
-        if summary.startswith("LLM error:"):
-            summary = f"• Topic: {title[:100]}\n• Speaker: {speaker}\n• Bank: {central_bank}"
+        # Execute with retry wrapper
+        result = retry_with_backoff(
+            fn=lambda: nim_reasoning.generate(prompt, max_tokens=400, temperature=0.2),
+            validate_fn=validate_summary_response,
+            record_id=reference,
+            fallback_fn=get_fallback,
+            config=retry_config,
+            logger=context.log,
+        )
 
-        # Truncate if too long
-        if len(summary) > 1500:
-            summary = summary[:1500] + "..."
+        # Get summary (either parsed or fallback)
+        summary = result.parsed_data if result.status == "success" else result.fallback_values
+        if summary is None:
+            summary = get_fallback()
 
-        return {"reference": reference, "summary": summary}
+        return {
+            "reference": reference,
+            "summary": summary,
+            "_llm_status": result.status,
+            "_llm_error": result.error_message,
+            "_llm_attempts": result.attempts,
+            "_llm_fallback_used": result.fallback_used,
+        }
 
     # Process with checkpointing
     context.log.info(f"Starting summarization of {len(df)} speeches with checkpointing")
@@ -662,15 +726,27 @@ Generate a COMPACT bullet-point summary (under 1000 characters total):"""
         msg = "Summarization checkpoint returned no results"
         raise RuntimeError(msg)
 
-    # Log summary statistics
+    # Log summary statistics with dead letter info
+    total = len(results_df)
+    failed_count = results_df.filter(pl.col("_llm_status") == "failed").height
+    success_count = total - failed_count
+
+    context.log.info("Summarization complete:")
+    context.log.info(f"  Total processed: {total}")
+    context.log.info(f"  Successful: {success_count} ({100*success_count/total:.1f}%)")
+    context.log.info(f"  Failed (using fallback): {failed_count} ({100*failed_count/total:.1f}%)")
+
+    if failed_count > 0:
+        failed_refs = results_df.filter(pl.col("_llm_status") == "failed")["reference"].to_list()[:10]
+        context.log.warning(f"  Failed references (first 10): {failed_refs}")
+
     summaries = results_df["summary"].to_list()
     summary_lengths = [len(s) for s in summaries]
     avg_len = sum(summary_lengths) / len(summary_lengths) if summary_lengths else 0
     max_len = max(summary_lengths) if summary_lengths else 0
     min_len = min(summary_lengths) if summary_lengths else 0
     context.log.info(
-        f"Generated {len(summaries)} compact summaries: "
-        f"avg={avg_len:.0f} chars, min={min_len}, max={max_len}"
+        f"Summary lengths: avg={avg_len:.0f} chars, min={min_len}, max={max_len}"
     )
 
     return results_df

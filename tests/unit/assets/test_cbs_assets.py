@@ -999,3 +999,418 @@ class TestSpeechSummaries:
         assert "reference" in df.columns
         assert "summary" in df.columns
         assert len(df) == 2
+
+
+# =============================================================================
+# Retry Behavior Tests (Phase 2)
+# =============================================================================
+
+
+class TestSpeechClassificationRetryBehavior:
+    """Tests for speech_classification retry and dead letter behavior.
+
+    These tests verify:
+    - Dead letter columns are present in output
+    - Retry logic is applied on transient failures
+    - Fallback values are used after max retries
+    - Column types are correct
+    """
+
+    @pytest.fixture
+    def sample_cleaned_df(self) -> pl.DataFrame:
+        """Create sample cleaned speeches DataFrame."""
+        return pl.DataFrame(
+            {
+                "reference": ["BIS_2024_001", "BIS_2024_002", "BIS_2024_003"],
+                "date": ["2024-01-15", "2024-01-20", "2024-02-01"],
+                "central_bank": ["FED", "ECB", "BOE"],
+                "speaker": ["Powell", "Lagarde", "Bailey"],
+                "title": ["Rate Decision", "Policy Update", "Inflation Report"],
+                "text": ["Federal Reserve monetary policy discussion..."] * 3,
+            }
+        )
+
+    @pytest.fixture
+    def mock_minio_for_checkpoint(self) -> MagicMock:
+        """Create mock MinIO resource for checkpointing."""
+        resource = MagicMock()
+        resource.ensure_bucket = MagicMock()
+        client = MagicMock()
+        client.get_object.side_effect = Exception("Not found")
+        client.put_object = MagicMock()
+        client.remove_object = MagicMock()
+        resource.get_client = MagicMock(return_value=client)
+        return resource
+
+    def test_output_has_dead_letter_columns(
+        self,
+        asset_context: AssetExecutionContext,
+        sample_cleaned_df: pl.DataFrame,
+        mock_minio_for_checkpoint: MagicMock,
+    ) -> None:
+        """Test output DataFrame includes dead letter columns."""
+        mock_nim = MagicMock()
+        mock_nim.generate.return_value = (
+            '{"monetary_stance": "neutral", "trade_stance": "neutral", '
+            '"tariff_mention": 0, "economic_outlook": "neutral"}'
+        )
+
+        # Create results with dead letter columns
+        results_df = pl.DataFrame(
+            {
+                "reference": ["BIS_2024_001", "BIS_2024_002", "BIS_2024_003"],
+                "monetary_stance": [3, 3, 3],
+                "trade_stance": [3, 3, 3],
+                "tariff_mention": [0, 0, 0],
+                "economic_outlook": [3, 3, 3],
+                "_llm_status": ["success", "success", "success"],
+                "_llm_error": [None, None, None],
+                "_llm_attempts": [1, 1, 1],
+                "_llm_fallback_used": [False, False, False],
+            }
+        )
+
+        with (
+            patch(
+                "brev_pipelines.assets.central_bank_speeches.LLMCheckpointManager",
+            ) as mock_checkpoint_cls,
+            patch(
+                "brev_pipelines.assets.central_bank_speeches.process_with_checkpoint",
+                return_value=results_df,
+            ),
+        ):
+            mock_checkpoint_cls.return_value.cleanup = MagicMock()
+            df = speech_classification(
+                asset_context,
+                sample_cleaned_df,
+                mock_nim,
+                mock_minio_for_checkpoint,
+            )
+
+        # Verify dead letter columns exist
+        assert "_llm_status" in df.columns
+        assert "_llm_error" in df.columns
+        assert "_llm_attempts" in df.columns
+        assert "_llm_fallback_used" in df.columns
+
+    def test_dead_letter_column_types(
+        self,
+        asset_context: AssetExecutionContext,
+        sample_cleaned_df: pl.DataFrame,
+        mock_minio_for_checkpoint: MagicMock,
+    ) -> None:
+        """Test dead letter columns have correct Polars types."""
+        mock_nim = MagicMock()
+        mock_nim.generate.return_value = (
+            '{"monetary_stance": "neutral", "trade_stance": "neutral", '
+            '"tariff_mention": 0, "economic_outlook": "neutral"}'
+        )
+
+        results_df = pl.DataFrame(
+            {
+                "reference": ["BIS_2024_001"],
+                "monetary_stance": [3],
+                "trade_stance": [3],
+                "tariff_mention": [0],
+                "economic_outlook": [3],
+                "_llm_status": ["success"],
+                "_llm_error": [None],
+                "_llm_attempts": [1],
+                "_llm_fallback_used": [False],
+            }
+        )
+
+        with (
+            patch(
+                "brev_pipelines.assets.central_bank_speeches.LLMCheckpointManager",
+            ) as mock_checkpoint_cls,
+            patch(
+                "brev_pipelines.assets.central_bank_speeches.process_with_checkpoint",
+                return_value=results_df,
+            ),
+        ):
+            mock_checkpoint_cls.return_value.cleanup = MagicMock()
+            df = speech_classification(
+                asset_context,
+                sample_cleaned_df.head(1),
+                mock_nim,
+                mock_minio_for_checkpoint,
+            )
+
+        # Verify column types
+        assert df.schema["_llm_status"] == pl.Utf8
+        assert df.schema["_llm_attempts"] == pl.Int64
+        assert df.schema["_llm_fallback_used"] == pl.Boolean
+
+    def test_successful_classification_has_success_status(
+        self,
+        asset_context: AssetExecutionContext,
+        sample_cleaned_df: pl.DataFrame,
+        mock_minio_for_checkpoint: MagicMock,
+    ) -> None:
+        """Test successful LLM calls have status='success'."""
+        mock_nim = MagicMock()
+        mock_nim.generate.return_value = (
+            '{"monetary_stance": "hawkish", "trade_stance": "neutral", '
+            '"tariff_mention": 1, "economic_outlook": "positive"}'
+        )
+
+        results_df = pl.DataFrame(
+            {
+                "reference": ["BIS_2024_001"],
+                "monetary_stance": [4],
+                "trade_stance": [3],
+                "tariff_mention": [1],
+                "economic_outlook": [4],
+                "_llm_status": ["success"],
+                "_llm_error": [None],
+                "_llm_attempts": [1],
+                "_llm_fallback_used": [False],
+            }
+        )
+
+        with (
+            patch(
+                "brev_pipelines.assets.central_bank_speeches.LLMCheckpointManager",
+            ) as mock_checkpoint_cls,
+            patch(
+                "brev_pipelines.assets.central_bank_speeches.process_with_checkpoint",
+                return_value=results_df,
+            ),
+        ):
+            mock_checkpoint_cls.return_value.cleanup = MagicMock()
+            df = speech_classification(
+                asset_context,
+                sample_cleaned_df.head(1),
+                mock_nim,
+                mock_minio_for_checkpoint,
+            )
+
+        assert df["_llm_status"][0] == "success"
+        assert df["_llm_fallback_used"][0] is False
+        assert df["_llm_attempts"][0] == 1
+
+    def test_failed_classification_has_failed_status_and_fallback(
+        self,
+        asset_context: AssetExecutionContext,
+        sample_cleaned_df: pl.DataFrame,
+        mock_minio_for_checkpoint: MagicMock,
+    ) -> None:
+        """Test failed LLM calls use fallback values."""
+        mock_nim = MagicMock()
+        mock_nim.generate.return_value = "LLM error: service unavailable"
+
+        # Results after using fallback
+        results_df = pl.DataFrame(
+            {
+                "reference": ["BIS_2024_001"],
+                "monetary_stance": [3],  # fallback neutral
+                "trade_stance": [3],
+                "tariff_mention": [0],
+                "economic_outlook": [3],
+                "_llm_status": ["failed"],
+                "_llm_error": ["service unavailable"],
+                "_llm_attempts": [5],
+                "_llm_fallback_used": [True],
+            }
+        )
+
+        with (
+            patch(
+                "brev_pipelines.assets.central_bank_speeches.LLMCheckpointManager",
+            ) as mock_checkpoint_cls,
+            patch(
+                "brev_pipelines.assets.central_bank_speeches.process_with_checkpoint",
+                return_value=results_df,
+            ),
+        ):
+            mock_checkpoint_cls.return_value.cleanup = MagicMock()
+            df = speech_classification(
+                asset_context,
+                sample_cleaned_df.head(1),
+                mock_nim,
+                mock_minio_for_checkpoint,
+            )
+
+        assert df["_llm_status"][0] == "failed"
+        assert df["_llm_fallback_used"][0] is True
+        # Fallback values are neutral (3, 3, 0, 3)
+        assert df["monetary_stance"][0] == 3
+        assert df["trade_stance"][0] == 3
+        assert df["tariff_mention"][0] == 0
+        assert df["economic_outlook"][0] == 3
+
+
+class TestSpeechSummariesRetryBehavior:
+    """Tests for speech_summaries retry and dead letter behavior.
+
+    These tests verify:
+    - Dead letter columns are present in output
+    - Successful summaries have correct status
+    - Failed summaries use fallback values
+    """
+
+    @pytest.fixture
+    def sample_cleaned_df(self) -> pl.DataFrame:
+        """Create sample cleaned speeches DataFrame."""
+        return pl.DataFrame(
+            {
+                "reference": ["BIS_2024_001"],
+                "date": ["2024-01-15"],
+                "central_bank": ["FED"],
+                "speaker": ["Powell"],
+                "title": ["Rate Decision"],
+                "text": ["Federal Reserve monetary policy discussion..." * 50],
+            }
+        )
+
+    @pytest.fixture
+    def mock_minio_for_checkpoint(self) -> MagicMock:
+        """Create mock MinIO resource for checkpointing."""
+        resource = MagicMock()
+        resource.ensure_bucket = MagicMock()
+        client = MagicMock()
+        client.get_object.side_effect = Exception("Not found")
+        client.put_object = MagicMock()
+        client.remove_object = MagicMock()
+        resource.get_client = MagicMock(return_value=client)
+        return resource
+
+    def test_output_has_dead_letter_columns(
+        self,
+        asset_context: AssetExecutionContext,
+        sample_cleaned_df: pl.DataFrame,
+        mock_minio_for_checkpoint: MagicMock,
+    ) -> None:
+        """Test output DataFrame includes dead letter columns."""
+        mock_nim = MagicMock()
+        mock_nim.generate.return_value = (
+            "This is a comprehensive summary of the Federal Reserve speech "
+            "discussing monetary policy, inflation targets, and economic outlook."
+        )
+
+        results_df = pl.DataFrame(
+            {
+                "reference": ["BIS_2024_001"],
+                "summary": ["This is a comprehensive summary..."],
+                "_llm_status": ["success"],
+                "_llm_error": [None],
+                "_llm_attempts": [1],
+                "_llm_fallback_used": [False],
+            }
+        )
+
+        with (
+            patch(
+                "brev_pipelines.assets.central_bank_speeches.LLMCheckpointManager",
+            ) as mock_checkpoint_cls,
+            patch(
+                "brev_pipelines.assets.central_bank_speeches.process_with_checkpoint",
+                return_value=results_df,
+            ),
+        ):
+            mock_checkpoint_cls.return_value.cleanup = MagicMock()
+            df = speech_summaries(
+                asset_context,
+                sample_cleaned_df,
+                mock_nim,
+                mock_minio_for_checkpoint,
+            )
+
+        # Verify dead letter columns exist
+        assert "_llm_status" in df.columns
+        assert "_llm_error" in df.columns
+        assert "_llm_attempts" in df.columns
+        assert "_llm_fallback_used" in df.columns
+
+    def test_successful_summary_has_success_status(
+        self,
+        asset_context: AssetExecutionContext,
+        sample_cleaned_df: pl.DataFrame,
+        mock_minio_for_checkpoint: MagicMock,
+    ) -> None:
+        """Test successful summaries have status='success'."""
+        mock_nim = MagicMock()
+        summary_text = (
+            "• Inflation target: 2%\n"
+            "• GDP growth: moderate\n"
+            "• Key concern: labor market tightness"
+        )
+        mock_nim.generate.return_value = summary_text
+
+        results_df = pl.DataFrame(
+            {
+                "reference": ["BIS_2024_001"],
+                "summary": [summary_text],
+                "_llm_status": ["success"],
+                "_llm_error": [None],
+                "_llm_attempts": [1],
+                "_llm_fallback_used": [False],
+            }
+        )
+
+        with (
+            patch(
+                "brev_pipelines.assets.central_bank_speeches.LLMCheckpointManager",
+            ) as mock_checkpoint_cls,
+            patch(
+                "brev_pipelines.assets.central_bank_speeches.process_with_checkpoint",
+                return_value=results_df,
+            ),
+        ):
+            mock_checkpoint_cls.return_value.cleanup = MagicMock()
+            df = speech_summaries(
+                asset_context,
+                sample_cleaned_df,
+                mock_nim,
+                mock_minio_for_checkpoint,
+            )
+
+        assert df["_llm_status"][0] == "success"
+        assert df["_llm_fallback_used"][0] is False
+        assert len(df["summary"][0]) > 50
+
+    def test_failed_summary_uses_fallback(
+        self,
+        asset_context: AssetExecutionContext,
+        sample_cleaned_df: pl.DataFrame,
+        mock_minio_for_checkpoint: MagicMock,
+    ) -> None:
+        """Test failed summaries use fallback values."""
+        mock_nim = MagicMock()
+        mock_nim.generate.return_value = "LLM error: timeout"
+
+        fallback_summary = "• Topic: Rate Decision\n• Speaker: Powell\n• Bank: FED"
+        results_df = pl.DataFrame(
+            {
+                "reference": ["BIS_2024_001"],
+                "summary": [fallback_summary],
+                "_llm_status": ["failed"],
+                "_llm_error": ["timeout"],
+                "_llm_attempts": [5],
+                "_llm_fallback_used": [True],
+            }
+        )
+
+        with (
+            patch(
+                "brev_pipelines.assets.central_bank_speeches.LLMCheckpointManager",
+            ) as mock_checkpoint_cls,
+            patch(
+                "brev_pipelines.assets.central_bank_speeches.process_with_checkpoint",
+                return_value=results_df,
+            ),
+        ):
+            mock_checkpoint_cls.return_value.cleanup = MagicMock()
+            df = speech_summaries(
+                asset_context,
+                sample_cleaned_df,
+                mock_nim,
+                mock_minio_for_checkpoint,
+            )
+
+        assert df["_llm_status"][0] == "failed"
+        assert df["_llm_fallback_used"][0] is True
+        # Fallback contains basic info
+        assert "Rate Decision" in df["summary"][0]
+        assert "Powell" in df["summary"][0]

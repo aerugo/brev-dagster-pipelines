@@ -737,21 +737,27 @@ def synthetic_data_product(
     config: PipelineConfig,
     synthetic_summaries: tuple[pl.DataFrame, dict[str, Any]],
     lakefs: LakeFSResource,
+    synthetic_embeddings_snapshot: dict[str, Any],  # Dependency to prevent concurrent commits
 ) -> dict[str, Any]:
     """Store synthetic summaries as versioned data product in LakeFS.
 
     The synthetic dataset contains metadata, classifications, and compact summaries
     (no full speech text). Uses trial-specific path when is_trial=True.
 
+    Depends on synthetic_embeddings_snapshot to ensure sequential LakeFS commits
+    (prevents "predicate failed" errors from concurrent commits).
+
     Args:
         context: Dagster execution context for logging.
         config: Pipeline configuration (is_trial for path selection).
         synthetic_summaries: Tuple of (synthetic DataFrame, evaluation).
         lakefs: LakeFS resource for data versioning.
+        synthetic_embeddings_snapshot: Previous snapshot (unused, forces sequential execution).
 
     Returns:
         Dictionary with storage metadata (path, commit_id, counts).
     """
+    del synthetic_embeddings_snapshot  # Unused, exists only to enforce dependency
     from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
 
     df, _ = synthetic_summaries

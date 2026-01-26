@@ -1064,21 +1064,27 @@ def speeches_data_product(
     config: PipelineConfig,
     enriched_speeches: pl.DataFrame,
     lakefs: LakeFSResource,
+    embeddings_snapshot: dict[str, Any],  # Dependency to prevent concurrent commits
 ) -> dict[str, Any]:
     """Store final data product in LakeFS with versioning.
 
     Creates a versioned Parquet file in LakeFS for downstream consumption.
     Uses trial-specific path when is_trial=True to keep trial data separate.
 
+    Depends on embeddings_snapshot to ensure sequential LakeFS commits
+    (prevents "predicate failed" errors from concurrent commits).
+
     Args:
         context: Dagster execution context for logging.
         config: Pipeline configuration (is_trial for path selection).
         enriched_speeches: Final enriched DataFrame.
         lakefs: LakeFS resource for data versioning.
+        embeddings_snapshot: Previous snapshot (unused, forces sequential execution).
 
     Returns:
         Dictionary with storage metadata (path, commit_id, counts).
     """
+    del embeddings_snapshot  # Unused, exists only to enforce dependency
     from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
 
     df = enriched_speeches

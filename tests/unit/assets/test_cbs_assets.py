@@ -357,6 +357,7 @@ class TestSpeechesDataProduct:
             pipeline_config,
             sample_enriched_df,
             mock_lakefs_with_client,
+            embeddings_snapshot={"path": "mock", "commit_id": "mock"},
         )
 
         mock_client = mock_lakefs_with_client.get_client.return_value
@@ -379,6 +380,7 @@ class TestSpeechesDataProduct:
             pipeline_config,
             sample_enriched_df,
             mock_lakefs_with_client,
+            embeddings_snapshot={"path": "mock", "commit_id": "mock"},
         )
 
         assert result["num_records"] == 3
@@ -400,6 +402,7 @@ class TestSpeechesDataProduct:
             config,
             sample_enriched_df,
             mock_lakefs_with_client,
+            embeddings_snapshot={"path": "mock", "commit_id": "mock"},
         )
 
         mock_client = mock_lakefs_with_client.get_client.return_value
@@ -422,6 +425,7 @@ class TestSpeechesDataProduct:
             pipeline_config,
             sample_enriched_df,
             mock_lakefs_with_client,
+            embeddings_snapshot={"path": "mock", "commit_id": "mock"},
         )
 
         # Should still return result with None commit_id

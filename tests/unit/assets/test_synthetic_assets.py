@@ -564,6 +564,7 @@ class TestSyntheticDataProduct:
             pipeline_config,
             sample_synthetic_tuple,
             mock_lakefs_with_client,
+            synthetic_embeddings_snapshot={"path": "mock", "commit_id": "mock"},
         )
 
         mock_client = mock_lakefs_with_client.get_client.return_value
@@ -585,6 +586,7 @@ class TestSyntheticDataProduct:
             config,
             sample_synthetic_tuple,
             mock_lakefs_with_client,
+            synthetic_embeddings_snapshot={"path": "mock", "commit_id": "mock"},
         )
 
         mock_client = mock_lakefs_with_client.get_client.return_value
@@ -614,6 +616,7 @@ class TestSyntheticDataProduct:
             pipeline_config,
             sample_synthetic_tuple,
             mock_lakefs_with_client,
+            synthetic_embeddings_snapshot={"path": "mock", "commit_id": "mock"},
         )
 
         # Parse uploaded parquet

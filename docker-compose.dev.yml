@@ -1,0 +1,212 @@
+# =============================================================================
+# Local Development Environment - Mirrors Production K8s Configuration
+# =============================================================================
+# This docker-compose mirrors the Helm chart configurations in k8s/apps/
+# for MinIO, LakeFS, and Weaviate to ensure dev/prod parity.
+#
+# Production references:
+#   - k8s/apps/minio/values.yaml
+#   - k8s/apps/lakefs/values.yaml
+#   - k8s/apps/weaviate/values.yaml
+# =============================================================================
+
+services:
+  # ============================================================================
+  # MinIO - S3-compatible object storage
+  # Mirrors: k8s/apps/minio/values.yaml
+  # ============================================================================
+  minio:
+    image: minio/minio:RELEASE.2024-01-18T22-51-28Z
+    container_name: dagster-minio
+    ports:
+      - "9000:9000"   # API (matches service.port: 9000)
+      - "9001:9001"   # Console (matches consoleService.port: 9001)
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password123
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9000'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Create default buckets matching production (k8s/apps/minio/values.yaml buckets:)
+  minio-init:
+    image: minio/mc:latest
+    container_name: dagster-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      echo 'Configuring MinIO client...';
+      mc alias set myminio http://minio:9000 admin password123;
+
+      echo 'Creating buckets (matching production k8s/apps/minio/values.yaml)...';
+      mc mb myminio/raw-data --ignore-existing;
+      mc mb myminio/data-products --ignore-existing;
+      mc mb myminio/lakefs --ignore-existing;
+
+      echo 'Creating additional buckets for Dagster...';
+      mc mb myminio/dagster-checkpoints --ignore-existing;
+      mc mb myminio/dagster-storage --ignore-existing;
+
+      echo 'Buckets created:';
+      mc ls myminio;
+      "
+
+  # ============================================================================
+  # LakeFS - Data versioning on top of MinIO
+  # Mirrors: k8s/apps/lakefs/values.yaml
+  # ============================================================================
+  lakefs:
+    image: treeverse/lakefs:1.34.0
+    container_name: dagster-lakefs
+    # Run as root to avoid permission issues with volumes
+    user: root
+    ports:
+      - "8000:8000"  # Matches service.port: 8000
+    environment:
+      # Database configuration (matches lakefsConfig.database)
+      - LAKEFS_DATABASE_TYPE=local
+      - LAKEFS_DATABASE_LOCAL_PATH=/home/lakefs/data/lakefs.db
+
+      # Blockstore configuration (matches lakefsConfig.blockstore)
+      # Points to MinIO with path-style access
+      - LAKEFS_BLOCKSTORE_TYPE=s3
+      - LAKEFS_BLOCKSTORE_S3_ENDPOINT=http://minio:9000
+      - LAKEFS_BLOCKSTORE_S3_FORCE_PATH_STYLE=true
+      - LAKEFS_BLOCKSTORE_S3_DISCOVER_BUCKET_REGION=false
+
+      # MinIO credentials (matches extraEnvVars in values.yaml)
+      - LAKEFS_BLOCKSTORE_S3_CREDENTIALS_ACCESS_KEY_ID=admin
+      - LAKEFS_BLOCKSTORE_S3_CREDENTIALS_SECRET_ACCESS_KEY=password123
+
+      # Auth encryption (matches lakefsConfig.auth.encrypt.secret_key)
+      - LAKEFS_AUTH_ENCRYPT_SECRET_KEY=a]$$u9Yv-<M(5%dQh-local-dev-key-32
+
+      # Disable stats/telemetry
+      - LAKEFS_STATS_ENABLED=false
+
+      # Initial admin setup (matching production setup-job.yaml behavior)
+      - LAKEFS_INSTALLATION_USER_NAME=admin
+      - LAKEFS_INSTALLATION_ACCESS_KEY_ID=AKIAIOSFOLKFSSAMPLES
+      - LAKEFS_INSTALLATION_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYSAMPLEKEY
+    depends_on:
+      minio:
+        condition: service_healthy
+    volumes:
+      - lakefs-data:/home/lakefs/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/api/v1/healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Initialize LakeFS repository (mirrors k8s/apps/lakefs/templates/setup-job.yaml)
+  lakefs-init:
+    image: curlimages/curl:latest
+    container_name: dagster-lakefs-init
+    depends_on:
+      lakefs:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -c
+      - |
+        echo "=== LakeFS Repository Setup ==="
+        echo "Mirrors: k8s/apps/lakefs/values.yaml repository configuration"
+        echo ""
+        sleep 3
+
+        # Create repository 'data' with storage namespace s3://lakefs/data
+        echo "Creating repository: data (storage: s3://lakefs/data, branch: main)..."
+        REPO_RESULT=$$(curl -s -X POST "http://lakefs:8000/api/v1/repositories" \
+          -u "AKIAIOSFOLKFSSAMPLES:wJalrXUtnFEMI/K7MDENG/bPxRfiCYSAMPLEKEY" \
+          -H "Content-Type: application/json" \
+          -d '{"name": "data", "storage_namespace": "s3://lakefs/data", "default_branch": "main"}' 2>&1)
+
+        if echo "$$REPO_RESULT" | grep -q '"id"'; then
+          echo "  Repository created successfully"
+        elif echo "$$REPO_RESULT" | grep -q "already exists"; then
+          echo "  Repository already exists"
+        else
+          echo "  Result: $$REPO_RESULT"
+        fi
+
+        # Create staging branch (matches repository.branches: [staging])
+        echo "Creating branch: staging (from main)..."
+        BRANCH_RESULT=$$(curl -s -X POST "http://lakefs:8000/api/v1/repositories/data/branches" \
+          -u "AKIAIOSFOLKFSSAMPLES:wJalrXUtnFEMI/K7MDENG/bPxRfiCYSAMPLEKEY" \
+          -H "Content-Type: application/json" \
+          -d '{"name": "staging", "source": "main"}' 2>&1)
+
+        if echo "$$BRANCH_RESULT" | grep -q "commit_id"; then
+          echo "  Branch created successfully"
+        elif echo "$$BRANCH_RESULT" | grep -q "already exists"; then
+          echo "  Branch already exists"
+        else
+          echo "  Result: $$BRANCH_RESULT"
+        fi
+
+        echo ""
+        echo "=== LakeFS Setup Complete ==="
+        echo "Repository: data"
+        echo "Branches: main, staging"
+        echo "Storage: s3://lakefs/data (MinIO)"
+
+  # ============================================================================
+  # Weaviate - Vector database
+  # Mirrors: k8s/apps/weaviate/values.yaml
+  # ============================================================================
+  weaviate:
+    image: cr.weaviate.io/semitechnologies/weaviate:1.27.6  # Matches image.tag
+    container_name: dagster-weaviate
+    ports:
+      - "8080:8080"   # HTTP API (matches service.port: 8080)
+      - "50051:50051" # gRPC (matches grpcService.port: 50051)
+    environment:
+      # Cluster configuration (matches env.CLUSTER_HOSTNAME)
+      CLUSTER_HOSTNAME: weaviate-0
+      CLUSTER_JOIN: ""
+
+      # Module configuration (matches env.DEFAULT_VECTORIZER_MODULE, ENABLE_MODULES)
+      # No vectorizer modules - we generate embeddings externally via NIM
+      DEFAULT_VECTORIZER_MODULE: none
+      ENABLE_MODULES: ""
+
+      # Query defaults (matches env.QUERY_DEFAULTS_LIMIT, QUERY_MAXIMUM_RESULTS)
+      QUERY_DEFAULTS_LIMIT: "20"
+      QUERY_MAXIMUM_RESULTS: "10000"
+
+      # Authentication (matches authentication.anonymous_access.enabled: true)
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+
+      # Telemetry (matches env.DISABLE_TELEMETRY: true)
+      DISABLE_TELEMETRY: "true"
+
+      # Logging (matches env.LOG_LEVEL, LOG_FORMAT)
+      LOG_LEVEL: info
+      LOG_FORMAT: text
+
+      # Persistence
+      PERSISTENCE_DATA_PATH: /var/lib/weaviate
+    volumes:
+      - weaviate-data:/var/lib/weaviate
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/v1/.well-known/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  minio-data:
+    name: dagster-minio-data
+  lakefs-data:
+    name: dagster-lakefs-data
+  weaviate-data:
+    name: dagster-weaviate-data

@@ -52,7 +52,7 @@ from brev_pipelines.resources.weaviate import (
     WeaviateConnectionError,
     WeaviateResource,
 )
-from brev_pipelines.types import SafeSynthConfig, WeaviatePropertyDef
+from brev_pipelines.types import SafeSynthConfig, SafeSynthEvaluationResult, WeaviatePropertyDef
 
 # Weaviate schema for synthetic speeches (summary-based, no full text)
 SYNTHETIC_SCHEMA: list[WeaviatePropertyDef] = [
@@ -390,7 +390,7 @@ def synthetic_summaries(
     # Single synthesis call with ALL data - wrapped with retry logic
     context.log.info("Starting Safe Synthesizer with retry support...")
 
-    def do_synthesis() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    def do_synthesis() -> tuple[list[dict[str, Any]], SafeSynthEvaluationResult]:
         return safe_synth.synthesize(
             input_data=data_for_synthesis,
             run_id=run_id,

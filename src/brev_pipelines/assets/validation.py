@@ -238,7 +238,12 @@ def validate_lakefs(
             )
         except LakeFSConnectionError as e:
             result.tests.append(
-                {"name": "list_repositories", "passed": False, "error": str(e), "error_type": "connection"}
+                {
+                    "name": "list_repositories",
+                    "passed": False,
+                    "error": str(e),
+                    "error_type": "connection",
+                }
             )
             result.passed = False
         except Exception as e:
@@ -259,7 +264,12 @@ def validate_lakefs(
             )
         except LakeFSConnectionError as e:
             result.tests.append(
-                {"name": "api_version", "passed": False, "error": str(e), "error_type": "connection"}
+                {
+                    "name": "api_version",
+                    "passed": False,
+                    "error": str(e),
+                    "error_type": "connection",
+                }
             )
             # Not a critical failure
         except Exception as e:
@@ -590,7 +600,11 @@ def quick_health_check(
         health = lakefs.health_check()
         results["lakefs"] = {"status": "healthy" if health else "unhealthy", "error": None}
     except LakeFSConnectionError as e:
-        results["lakefs"] = {"status": "unhealthy", "error": str(e)[:100], "error_type": "connection"}
+        results["lakefs"] = {
+            "status": "unhealthy",
+            "error": str(e)[:100],
+            "error_type": "connection",
+        }
     except Exception as e:
         results["lakefs"] = {"status": "unhealthy", "error": str(e)[:100]}
 
@@ -607,7 +621,11 @@ def quick_health_check(
         is_ready = weaviate_client.is_ready()
         results["weaviate"] = {"status": "healthy" if is_ready else "unhealthy", "error": None}
     except WeaviateConnectionError as e:
-        results["weaviate"] = {"status": "unhealthy", "error": str(e)[:100], "error_type": "connection"}
+        results["weaviate"] = {
+            "status": "unhealthy",
+            "error": str(e)[:100],
+            "error_type": "connection",
+        }
     except Exception as e:
         results["weaviate"] = {"status": "unhealthy", "error": str(e)[:100]}
 

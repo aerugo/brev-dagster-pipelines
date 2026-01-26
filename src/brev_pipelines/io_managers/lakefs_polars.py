@@ -98,9 +98,7 @@ class LakeFSPolarsIOManager(ConfigurableIOManager):
         except Exception as e:
             # LakeFS returns error when there are no changes to commit
             if "no changes" in str(e).lower():
-                context.log.info(
-                    f"No changes to commit for {asset_key} (data unchanged)"
-                )
+                context.log.info(f"No changes to commit for {asset_key} (data unchanged)")
             else:
                 raise
 

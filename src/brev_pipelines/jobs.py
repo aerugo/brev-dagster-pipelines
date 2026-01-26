@@ -45,6 +45,8 @@ speeches_trial_run = define_asset_job(
     ),
     selection=SPEECHES_ASSETS,
     config={
+        # Note: Dagster uses "ops" as the config key for asset configurations.
+        # This is expected behavior - assets use the same config namespace as ops.
         "ops": {
             "raw_speeches": {"config": TRIAL_RUN_CONFIG},
             "speeches_data_product": {"config": TRIAL_RUN_CONFIG},

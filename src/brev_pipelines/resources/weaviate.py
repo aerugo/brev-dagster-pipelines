@@ -162,9 +162,7 @@ class WeaviateResource(ConfigurableResource):
         except WeaviateConnectionError:
             raise
         except Exception as e:
-            raise WeaviateCollectionError(
-                f"Failed to ensure collection {name}: {e}"
-            ) from e
+            raise WeaviateCollectionError(f"Failed to ensure collection {name}: {e}") from e
         finally:
             client.close()
 
@@ -343,9 +341,7 @@ class WeaviateResource(ConfigurableResource):
         except WeaviateConnectionError:
             raise
         except Exception as e:
-            raise WeaviateCollectionError(
-                f"Failed to delete collection {name}: {e}"
-            ) from e
+            raise WeaviateCollectionError(f"Failed to delete collection {name}: {e}") from e
         finally:
             client.close()
 

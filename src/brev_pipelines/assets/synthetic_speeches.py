@@ -136,8 +136,7 @@ def enriched_data_for_synthesis(
         ) from None
     except LakeFSConnectionError as e:
         raise RuntimeError(
-            f"Cannot connect to LakeFS. Ensure LakeFS is running and accessible. "
-            f"Details: {e}"
+            f"Cannot connect to LakeFS. Ensure LakeFS is running and accessible. Details: {e}"
         ) from e
     except LakeFSError as e:
         raise RuntimeError(f"Failed to load enriched data from LakeFS: {e}") from e
@@ -241,13 +240,11 @@ def _validate_input_data_quality(
                     )
             else:
                 context.log.info(
-                    f"Input data quality: All {total_records} records have "
-                    "successful LLM results"
+                    f"Input data quality: All {total_records} records have successful LLM results"
                 )
     else:
         context.log.info(
-            "Input data does not contain dead letter columns "
-            "(legacy data or pre-retry pattern)"
+            "Input data does not contain dead letter columns (legacy data or pre-retry pattern)"
         )
 
 
@@ -540,7 +537,9 @@ def synthetic_validation_report(
                 path=html_report_path,
                 content=html_report_bytes,
             )
-            context.log.info(f"Stored HTML evaluation report to lakefs://data/main/{html_report_path}")
+            context.log.info(
+                f"Stored HTML evaluation report to lakefs://data/main/{html_report_path}"
+            )
         else:
             context.log.warning("HTML evaluation report not available from Safe Synthesizer")
     except LakeFSError as e:

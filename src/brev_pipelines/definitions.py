@@ -1,6 +1,9 @@
-"""Dagster definitions for Brev Data Platform."""
+"""Dagster definitions for Brev Data Platform.
 
-import os
+Environment variable handling uses Dagster's EnvVar pattern for consistency.
+EnvVar.get_value() resolves at definition time; EnvVar() without get_value()
+is used for secrets (MINIO keys, LakeFS keys) which Dagster resolves at runtime.
+"""
 
 from dagster import Definitions, EnvVar
 
@@ -17,6 +20,18 @@ from brev_pipelines.resources.nim_embedding import NIMEmbeddingResource
 from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
 from brev_pipelines.resources.weaviate import WeaviateResource
 
+
+def _env(name: str, default: str) -> str:
+    """Get environment variable value with default, using Dagster's EnvVar."""
+    return EnvVar(name).get_value() or default
+
+
+def _env_int(name: str, default: int) -> int:
+    """Get environment variable as int with default, using Dagster's EnvVar."""
+    value = EnvVar(name).get_value()
+    return int(value) if value else default
+
+
 defs = Definitions(
     assets=[
         *demo_assets,
@@ -28,51 +43,51 @@ defs = Definitions(
     jobs=all_jobs,
     resources={
         "minio": MinIOResource(
-            endpoint=os.getenv("MINIO_ENDPOINT", "minio.minio.svc.cluster.local:9000"),
+            endpoint=_env("MINIO_ENDPOINT", "minio.minio.svc.cluster.local:9000"),
             access_key=EnvVar("MINIO_ACCESS_KEY"),
             secret_key=EnvVar("MINIO_SECRET_KEY"),
             secure=False,
         ),
         "lakefs": LakeFSResource(
-            endpoint=os.getenv("LAKEFS_ENDPOINT", "lakefs.lakefs.svc.cluster.local:8000"),
+            endpoint=_env("LAKEFS_ENDPOINT", "lakefs.lakefs.svc.cluster.local:8000"),
             access_key=EnvVar("LAKEFS_ACCESS_KEY_ID"),
             secret_key=EnvVar("LAKEFS_SECRET_ACCESS_KEY"),
         ),
         "nim": NIMResource(
-            endpoint=os.getenv("NIM_ENDPOINT", "http://nim-llm.nvidia-ai.svc.cluster.local:8000"),
+            endpoint=_env("NIM_ENDPOINT", "http://nim-llm.nvidia-ai.svc.cluster.local:8000"),
         ),
         "nim_reasoning": NIMResource(
-            endpoint=os.getenv(
+            endpoint=_env(
                 "NIM_REASONING_ENDPOINT", "http://nim-reasoning.nvidia-ai.svc.cluster.local:8000"
             ),
             model="openai/gpt-oss-120b",
             timeout=600,  # Longer timeout for large reasoning model
         ),
         "nim_embedding": NIMEmbeddingResource(
-            endpoint=os.getenv(
+            endpoint=_env(
                 "NIM_EMBEDDING_ENDPOINT",
                 "http://nvidia-nim-embedding.nvidia-nim.svc.cluster.local:8000",
             ),
         ),
         "safe_synth": SafeSynthesizerResource(
-            namespace=os.getenv("SAFE_SYNTH_NAMESPACE", "nvidia-ai"),
-            service_endpoint=os.getenv(
+            namespace=_env("SAFE_SYNTH_NAMESPACE", "nvidia-ai"),
+            service_endpoint=_env(
                 "SAFE_SYNTH_ENDPOINT",
                 "http://nemo-safe-synthesizer.nvidia-ai.svc.cluster.local:8000",
             ),
-            nds_endpoint=os.getenv(
+            nds_endpoint=_env(
                 "NDS_ENDPOINT",
                 "http://nemo-data-store.nvidia-ai.svc.cluster.local:3000",
             ),
-            nds_token=os.getenv("HF_TOKEN", ""),
-            nds_repo=os.getenv("NDS_REPO", "admin/central-bank-speeches"),
-            priority_class=os.getenv("SAFE_SYNTH_PRIORITY", "batch-high"),
+            nds_token=_env("HF_TOKEN", ""),
+            nds_repo=_env("NDS_REPO", "admin/central-bank-speeches"),
+            priority_class=_env("SAFE_SYNTH_PRIORITY", "batch-high"),
         ),
         "weaviate": WeaviateResource(
-            host=os.getenv("WEAVIATE_HOST", "weaviate.weaviate.svc.cluster.local"),
-            port=int(os.getenv("WEAVIATE_PORT", "80")),
-            grpc_host=os.getenv("WEAVIATE_GRPC_HOST", "weaviate-grpc.weaviate.svc.cluster.local"),
-            grpc_port=int(os.getenv("WEAVIATE_GRPC_PORT", "50051")),
+            host=_env("WEAVIATE_HOST", "weaviate.weaviate.svc.cluster.local"),
+            port=_env_int("WEAVIATE_PORT", 80),
+            grpc_host=_env("WEAVIATE_GRPC_HOST", "weaviate-grpc.weaviate.svc.cluster.local"),
+            grpc_port=_env_int("WEAVIATE_GRPC_PORT", 50051),
         ),
     },
 )

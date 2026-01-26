@@ -39,8 +39,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from brev_pipelines.resources.nim import (
     NIMError,
+)
+from brev_pipelines.resources.nim import (
     NIMRateLimitError as NIMRateLimitException,
+)
+from brev_pipelines.resources.nim import (
     NIMServerError as NIMServerException,
+)
+from brev_pipelines.resources.nim import (
     NIMTimeoutError as NIMTimeoutException,
 )
 from brev_pipelines.types import (

@@ -4,7 +4,6 @@ import requests
 from dagster import ConfigurableResource
 from pydantic import Field
 
-
 # =============================================================================
 # Exception Types
 # =============================================================================
@@ -26,6 +25,7 @@ class NIMServerError(NIMError):
     """Raised when NIM returns 5xx error."""
 
     def __init__(self, status_code: int, message: str) -> None:
+        """Initialize with status code and message."""
         self.status_code = status_code
         super().__init__(f"NIM server error {status_code}: {message}")
 
@@ -92,9 +92,7 @@ class NIMResource(ConfigurableResource):  # type: ignore[type-arg]
                 timeout=effective_timeout,
             )
         except requests.exceptions.Timeout as e:
-            raise NIMTimeoutError(
-                f"NIM request timed out after {effective_timeout}s: {e}"
-            ) from e
+            raise NIMTimeoutError(f"NIM request timed out after {effective_timeout}s: {e}") from e
         except requests.exceptions.ConnectionError as e:
             raise NIMError(f"NIM connection failed: {e}") from e
         except requests.exceptions.RequestException as e:

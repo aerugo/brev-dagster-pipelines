@@ -22,11 +22,12 @@ from __future__ import annotations
 
 import random
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from dagster import DagsterLogManager
 
 T = TypeVar("T")
@@ -53,6 +54,7 @@ class SafeSynthServerError(SafeSynthError):
     """Raised when Safe Synthesizer returns server error."""
 
     def __init__(self, status_code: int, message: str) -> None:
+        """Initialize with status code and message."""
         self.status_code = status_code
         super().__init__(f"Safe Synthesizer error {status_code}: {message}")
 
@@ -61,6 +63,7 @@ class SafeSynthJobFailedError(SafeSynthError):
     """Raised when Safe Synthesizer job fails."""
 
     def __init__(self, job_id: str, reason: str) -> None:
+        """Initialize with job ID and failure reason."""
         self.job_id = job_id
         self.reason = reason
         super().__init__(f"Safe Synthesizer job {job_id} failed: {reason}")
@@ -196,17 +199,13 @@ def retry_safe_synth_call(
         except (ValueError, TypeError, KeyError) as e:
             # Client-side errors - don't retry
             if logger:
-                logger.error(
-                    f"Safe Synth validation error for {run_id} (not retrying): {e}"
-                )
+                logger.error(f"Safe Synth validation error for {run_id} (not retrying): {e}")
             raise
 
     # All retries exhausted
     if last_error:
         raise last_error
-    raise SafeSynthError(
-        f"Safe Synth call failed for {run_id} after {config.max_retries} attempts"
-    )
+    raise SafeSynthError(f"Safe Synth call failed for {run_id} after {config.max_retries} attempts")
 
 
 # =============================================================================

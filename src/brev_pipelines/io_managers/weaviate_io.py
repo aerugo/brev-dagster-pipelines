@@ -100,10 +100,17 @@ class WeaviateIOManager(ConfigurableIOManager):
         context.log.info(f"Inserted {count} objects into Weaviate collection {collection_name}")
 
     def load_input(self, context: InputContext) -> int:
-        """Return object count from Weaviate collection.
+        """Get count of objects in Weaviate collection.
 
-        Weaviate doesn't support efficient full retrieval, so we return
-        the count instead. For actual data, use vector_search methods.
+        Note: This returns a COUNT, not actual data. Weaviate is a vector DB
+        optimized for similarity search, not bulk data retrieval. Use this
+        to verify data was indexed, not to read data back.
+
+        For actual data retrieval, query Weaviate directly with search APIs:
+        - weaviate.vector_search() for similarity queries
+        - weaviate.get_client() for direct API access
+
+        This behavior is intentional and different from other I/O managers.
 
         Args:
             context: Dagster input context.

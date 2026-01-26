@@ -118,9 +118,7 @@ class LakeFSResource(ConfigurableResource):  # type: ignore[type-arg]
         except Exception as e:
             error_msg = str(e).lower()
             if any(pattern in error_msg for pattern in CONNECTION_ERROR_PATTERNS):
-                raise LakeFSConnectionError(
-                    f"Failed to list repositories: {e}"
-                ) from e
+                raise LakeFSConnectionError(f"Failed to list repositories: {e}") from e
             raise LakeFSError(f"Failed to list repositories: {e}") from e
 
     def get_object(
@@ -158,13 +156,9 @@ class LakeFSResource(ConfigurableResource):  # type: ignore[type-arg]
         except Exception as e:
             error_msg = str(e).lower()
             if any(pattern in error_msg for pattern in NOT_FOUND_PATTERNS):
-                raise LakeFSNotFoundError(
-                    f"Object not found: {repository}/{ref}/{path}"
-                ) from e
+                raise LakeFSNotFoundError(f"Object not found: {repository}/{ref}/{path}") from e
             if any(pattern in error_msg for pattern in CONNECTION_ERROR_PATTERNS):
-                raise LakeFSConnectionError(
-                    f"Failed to get object {path}: {e}"
-                ) from e
+                raise LakeFSConnectionError(f"Failed to get object {path}: {e}") from e
             raise LakeFSError(f"Failed to get object {path}: {e}") from e
 
     def put_object(
@@ -199,9 +193,7 @@ class LakeFSResource(ConfigurableResource):  # type: ignore[type-arg]
         except Exception as e:
             error_msg = str(e).lower()
             if any(pattern in error_msg for pattern in CONNECTION_ERROR_PATTERNS):
-                raise LakeFSConnectionError(
-                    f"Failed to upload object {path}: {e}"
-                ) from e
+                raise LakeFSConnectionError(f"Failed to upload object {path}: {e}") from e
             raise LakeFSError(f"Failed to upload object {path}: {e}") from e
 
     def health_check(self) -> bool:

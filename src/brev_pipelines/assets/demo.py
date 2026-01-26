@@ -9,7 +9,7 @@ import dagster as dg
 import pandas as pd
 
 from brev_pipelines.resources.minio import MinIOResource
-from brev_pipelines.resources.nim import NIMResource
+from brev_pipelines.resources.nim import NIMError, NIMResource
 
 
 @dg.asset(
@@ -82,7 +82,10 @@ def nim_enriched_data(
     cleaned_data: pd.DataFrame,
     nim: NIMResource,
 ) -> pd.DataFrame:
-    """Enrich data with AI-generated profiles using NIM LLM."""
+    """Enrich data with AI-generated profiles using NIM LLM.
+
+    Handles NIM errors gracefully by recording error message in profile field.
+    """
     df = cleaned_data.copy()
 
     # Only enrich a sample to save time/cost
@@ -90,22 +93,28 @@ def nim_enriched_data(
     sample_indices = df.sample(sample_size, random_state=42).index
 
     profiles: list[str] = []
+    error_count = 0
     for idx, row in df.iterrows():
         if idx in sample_indices:
             prompt = f"""Generate a brief customer profile (1 sentence) for:
 - Age: {row["age"]}, Region: {row["region"]}, Category: {row["category"]}, Tier: {row["tier"]}
 Be concise."""
             context.log.info(f"Calling NIM for {row['id']}...")
-            profile = nim.generate(prompt, max_tokens=50)
-            profiles.append(profile)
+            try:
+                profile = nim.generate(prompt, max_tokens=50)
+                profiles.append(profile)
+            except NIMError as e:
+                error_count += 1
+                context.log.warning(f"NIM error for {row['id']}: {e}")
+                profiles.append(f"Error: {e}")
         else:
             profiles.append("Not enriched (sample limit)")
 
     df["ai_profile"] = profiles
     enriched_count = sum(
-        1 for p in profiles if "error" not in p.lower() and "Not enriched" not in p
+        1 for p in profiles if not p.startswith("Error:") and "Not enriched" not in p
     )
-    context.log.info(f"Enriched {enriched_count}/{len(df)} records")
+    context.log.info(f"Enriched {enriched_count}/{len(df)} records ({error_count} errors)")
     return df
 
 
@@ -119,32 +128,41 @@ def data_summary(
     nim_enriched_data: pd.DataFrame,
     minio: MinIOResource,
 ) -> dict[str, Any]:
-    """Generate summary and store in MinIO."""
+    """Generate summary and store in MinIO.
+
+    Handles MinIO errors gracefully by including error info in output.
+    """
     df = nim_enriched_data
 
-    summary = {
+    summary: dict[str, Any] = {
         "total_records": len(df),
         "region_distribution": df["region"].value_counts().to_dict(),
         "tier_distribution": df["tier"].value_counts().to_dict(),
         "average_spend": round(df["spend"].mean(), 2),
-        "enriched_count": sum(1 for p in df["ai_profile"] if "Not enriched" not in p),
+        "enriched_count": sum(
+            1 for p in df["ai_profile"] if not p.startswith("Error:") and "Not enriched" not in p
+        ),
+        "storage_error": None,
     }
 
-    # Store in MinIO
+    # Store in MinIO with error handling
     bucket = "data-products"
-    minio.ensure_bucket(bucket)
+    try:
+        minio.ensure_bucket(bucket)
+        client = minio.get_client()
+        data = json.dumps(summary, indent=2).encode()
 
-    client = minio.get_client()
-    data = json.dumps(summary, indent=2).encode()
-
-    client.put_object(
-        bucket,
-        "demo/summary.json",
-        io.BytesIO(data),
-        len(data),
-        content_type="application/json",
-    )
-    context.log.info(f"Stored summary to {bucket}/demo/summary.json")
+        client.put_object(
+            bucket,
+            "demo/summary.json",
+            io.BytesIO(data),
+            len(data),
+            content_type="application/json",
+        )
+        context.log.info(f"Stored summary to {bucket}/demo/summary.json")
+    except Exception as e:
+        summary["storage_error"] = str(e)
+        context.log.warning(f"Failed to store summary in MinIO: {e}")
 
     return summary
 

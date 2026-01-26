@@ -171,23 +171,27 @@ uv run mypy src/brev_pipelines/ --strict        # Type checking
 
 There are three ways to run Dagster locally, depending on your needs:
 
-#### Option 1: Mock Mode (No External Services)
+#### Option 1: UI Exploration (No External Services)
 
-For UI exploration and basic testing without any external services:
+For exploring the Dagster UI without running any services:
 
 ```bash
 cd dagster
 
-# Start Dagster with mock environment
-# (Assets will fail if materialized, but UI works)
+# Copy the sample .env file (creates placeholder values)
+cp .env.example .env  # Or use the existing .env with mock values
+
+# Start Dagster
 uv run dagster dev -m brev_pipelines.definitions
 ```
 
 Access the UI at http://localhost:3000 to explore:
 - Asset graph visualization
-- Job definitions
+- Job definitions and configurations
 - Resource configurations
 - Schedule/sensor definitions
+
+**Note:** Assets will fail if materialized without services. Use Option 3 for full testing.
 
 #### Option 2: Port-Forward to Cluster Services
 
@@ -220,70 +224,52 @@ cd dagster
 uv run dagster dev -m brev_pipelines.definitions
 ```
 
-#### Option 3: Docker Compose (Local Services)
+#### Option 3: Docker Compose (Local Services) - Recommended
 
-For a fully local development environment:
+For a fully local development environment with all storage services:
 
 ```bash
-# Create docker-compose.yml for local services
-cat > docker-compose.yml << 'EOF'
-version: '3.8'
-services:
-  minio:
-    image: minio/minio:latest
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    environment:
-      MINIO_ROOT_USER: admin
-      MINIO_ROOT_PASSWORD: password
-    command: server /data --console-address ":9001"
-
-  lakefs:
-    image: treeverse/lakefs:latest
-    ports:
-      - "8000:8000"
-    environment:
-      LAKEFS_DATABASE_TYPE: local
-      LAKEFS_AUTH_ENCRYPT_SECRET_KEY: some-secret-key
-      LAKEFS_BLOCKSTORE_TYPE: local
-      LAKEFS_BLOCKSTORE_LOCAL_PATH: /data
-    depends_on:
-      - minio
-
-  weaviate:
-    image: semitechnologies/weaviate:latest
-    ports:
-      - "8080:8080"
-      - "50051:50051"
-    environment:
-      QUERY_DEFAULTS_LIMIT: 100
-      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
-      PERSISTENCE_DATA_PATH: /var/lib/weaviate
-      ENABLE_MODULES: ""
-EOF
-
-# Start services
-docker-compose up -d
-
-# Set environment for Dagster
-export MINIO_ENDPOINT=localhost:9000
-export MINIO_ACCESS_KEY=admin
-export MINIO_SECRET_KEY=password
-export LAKEFS_ENDPOINT=localhost:8000
-export LAKEFS_ACCESS_KEY_ID=admin
-export LAKEFS_SECRET_ACCESS_KEY=password
-export WEAVIATE_HOST=localhost
-export WEAVIATE_PORT=8080
-export WEAVIATE_GRPC_HOST=localhost
-export WEAVIATE_GRPC_PORT=50051
-
-# Start Dagster (NIM calls will fail without GPU)
 cd dagster
+
+# Start all services (MinIO, LakeFS, Weaviate)
+./scripts/dev-start.sh
+
+# Start Dagster
 uv run dagster dev -m brev_pipelines.definitions
 ```
 
-**Note:** NIM LLM and Safe Synthesizer require NVIDIA GPUs and are not easily run locally. Use port-forwarding to cluster services for full pipeline testing.
+This starts:
+- **MinIO** - S3 storage at http://localhost:9000 (console: http://localhost:9001)
+- **LakeFS** - Data versioning at http://localhost:8000
+- **Weaviate** - Vector database at http://localhost:8080
+
+The setup automatically:
+- Creates required MinIO buckets (`raw-data`, `data-products`, `lakefs`)
+- Initializes LakeFS repository (`data`) with `main` and `staging` branches
+- Configures Weaviate with external embeddings (no vectorizer modules)
+- Loads environment variables from `.env` file
+
+**LLM Mock Fallback:** The pipeline is designed to work without GPU services:
+- **NIM Embedding**: Returns deterministic hash-based vectors when unavailable
+- **NIM LLM**: Uses neutral fallback values (`monetary_stance=3`, etc.)
+- All outputs include tracking columns: `_llm_status`, `_llm_fallback_used`
+
+This allows full pipeline testing locally. To stop services:
+
+```bash
+./scripts/dev-stop.sh              # Stop services (keep data)
+docker-compose -f docker-compose.dev.yml down -v  # Stop and remove data
+```
+
+**Configuration Files:**
+| File | Description |
+|------|-------------|
+| `docker-compose.dev.yml` | Service definitions (mirrors k8s/apps/ config) |
+| `.env` | Environment variables (gitignored) |
+| `scripts/dev-start.sh` | Start services |
+| `scripts/dev-stop.sh` | Stop services |
+
+**Note:** Safe Synthesizer requires Kubernetes + GPU and cannot run locally. Use port-forwarding for synthetic data pipeline testing.
 
 ### Configuration Options
 

@@ -91,8 +91,34 @@ class NIMEmbeddingResource(ConfigurableResource):  # type: ignore[type-arg]
 
     use_mock_fallback: bool = Field(
         default=True,
-        description="Use mock embeddings if NIM service unavailable (for testing)",
+        description="Use mock embeddings if NIM service unavailable (for local dev)",
     )
+
+    # Cache health check result
+    _health_checked: bool = False
+    _service_available: bool = False
+
+    def _check_service_once(self) -> bool:
+        """Check service availability once and cache the result."""
+        if not self._health_checked:
+            self._service_available = self.health_check()
+            self._health_checked = True
+        return self._service_available
+
+    def _generate_mock_embeddings(self, texts: list[str]) -> list[list[float]]:
+        """Generate deterministic mock embeddings based on text hash."""
+        import hashlib
+
+        mock_embeddings = []
+        for text in texts:
+            text_hash = hashlib.sha256(text.encode()).hexdigest()
+            embedding = []
+            for i in range(1024):
+                idx = (i * 2) % 64
+                val = int(text_hash[idx : idx + 2], 16) / 255.0 - 0.5
+                embedding.append(val)
+            mock_embeddings.append(embedding)
+        return mock_embeddings
 
     def _embed_batch(
         self,
@@ -111,6 +137,10 @@ class NIMEmbeddingResource(ConfigurableResource):  # type: ignore[type-arg]
         Raises:
             RuntimeError: If all retry attempts fail and mock fallback is disabled.
         """
+        # Check service availability first if mock fallback enabled
+        if self.use_mock_fallback and not self._check_service_once():
+            return self._generate_mock_embeddings(texts)
+
         # Truncate long texts (model has input limit)
         truncated_texts = [text[:8192] if len(text) > 8192 else text for text in texts]
 
@@ -138,27 +168,17 @@ class NIMEmbeddingResource(ConfigurableResource):  # type: ignore[type-arg]
 
             except requests.exceptions.RequestException as e:
                 last_error = e
+                # If mock fallback enabled and connection failed, use mock immediately
+                if self.use_mock_fallback:
+                    self._service_available = False
+                    return self._generate_mock_embeddings(texts)
                 if attempt < self.max_retries - 1:
                     time.sleep(2**attempt)  # Exponential backoff
                 continue
 
         # If service unavailable and mock fallback enabled, return deterministic mock embeddings
         if self.use_mock_fallback:
-            import hashlib
-
-            mock_embeddings = []
-            for text in texts:
-                # Generate deterministic embedding based on text hash
-                text_hash = hashlib.sha256(text.encode()).hexdigest()
-                # Create 1024-dim vector from hash (repeating pattern)
-                embedding = []
-                for i in range(1024):
-                    # Use different parts of hash for each dimension
-                    idx = (i * 2) % 64
-                    val = int(text_hash[idx : idx + 2], 16) / 255.0 - 0.5
-                    embedding.append(val)
-                mock_embeddings.append(embedding)
-            return mock_embeddings
+            return self._generate_mock_embeddings(texts)
 
         raise RuntimeError(f"NIM embedding error after {self.max_retries} attempts: {last_error}")
 

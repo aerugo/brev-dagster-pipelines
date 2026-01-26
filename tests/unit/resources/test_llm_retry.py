@@ -301,9 +301,10 @@ class TestRetryWithBackoff:
         assert result.fallback_used is False
         assert call_count == 1
 
-    def test_retry_on_llm_error_string(self) -> None:
-        """LLM error strings should trigger retry."""
+    def test_retry_on_nim_exception(self) -> None:
+        """NIM exceptions should trigger retry."""
         from brev_pipelines.resources.llm_retry import RetryConfig, retry_with_backoff
+        from brev_pipelines.resources.nim import NIMTimeoutError
 
         call_count = 0
 
@@ -311,7 +312,7 @@ class TestRetryWithBackoff:
             nonlocal call_count
             call_count += 1
             if call_count < 3:
-                return "LLM error: timeout"
+                raise NIMTimeoutError("Request timed out")
             return '{"result": "ok"}'
 
         def validate(response: str) -> dict[str, str]:
@@ -375,9 +376,10 @@ class TestRetryWithBackoff:
     def test_fallback_after_max_retries(self) -> None:
         """After max retries, fallback values should be used."""
         from brev_pipelines.resources.llm_retry import RetryConfig, retry_with_backoff
+        from brev_pipelines.resources.nim import NIMServerError
 
         def llm_call() -> str:
-            return "LLM error: service unavailable"
+            raise NIMServerError(503, "service unavailable")
 
         def validate(response: str) -> dict[str, str]:
             return {"result": "ok"}
@@ -405,9 +407,10 @@ class TestRetryWithBackoff:
     def test_error_type_classification_timeout(self) -> None:
         """Timeout errors should be classified as LLMTimeoutError."""
         from brev_pipelines.resources.llm_retry import RetryConfig, retry_with_backoff
+        from brev_pipelines.resources.nim import NIMTimeoutError
 
         def llm_call() -> str:
-            return "LLM error: timeout exceeded"
+            raise NIMTimeoutError("timeout exceeded")
 
         def validate(response: str) -> dict[str, str]:
             return {}
@@ -429,9 +432,10 @@ class TestRetryWithBackoff:
     def test_error_type_classification_rate_limit(self) -> None:
         """Rate limit errors should be classified as LLMRateLimitError."""
         from brev_pipelines.resources.llm_retry import RetryConfig, retry_with_backoff
+        from brev_pipelines.resources.nim import NIMRateLimitError
 
         def llm_call() -> str:
-            return "LLM error: 429 rate limit exceeded"
+            raise NIMRateLimitError("429 rate limit exceeded")
 
         def validate(response: str) -> dict[str, str]:
             return {}
@@ -453,9 +457,10 @@ class TestRetryWithBackoff:
     def test_error_type_classification_server_error(self) -> None:
         """Server errors should be classified as LLMServerError."""
         from brev_pipelines.resources.llm_retry import RetryConfig, retry_with_backoff
+        from brev_pipelines.resources.nim import NIMServerError
 
         def llm_call() -> str:
-            return "LLM error: 503 service unavailable"
+            raise NIMServerError(503, "service unavailable")
 
         def validate(response: str) -> dict[str, str]:
             return {}
@@ -534,6 +539,7 @@ class TestRetryWithBackoff:
     def test_logger_receives_warnings(self) -> None:
         """Logger should receive warning messages on retry."""
         from brev_pipelines.resources.llm_retry import RetryConfig, retry_with_backoff
+        from brev_pipelines.resources.nim import NIMTimeoutError
 
         call_count = 0
 
@@ -541,7 +547,7 @@ class TestRetryWithBackoff:
             nonlocal call_count
             call_count += 1
             if call_count < 2:
-                return "LLM error: timeout"
+                raise NIMTimeoutError("Request timed out")
             return '{"ok": true}'
 
         def validate(response: str) -> dict[str, bool]:
@@ -568,9 +574,10 @@ class TestRetryWithBackoff:
     def test_logger_receives_error_on_permanent_failure(self) -> None:
         """Logger should receive error message on permanent failure."""
         from brev_pipelines.resources.llm_retry import RetryConfig, retry_with_backoff
+        from brev_pipelines.resources.nim import NIMServerError
 
         def llm_call() -> str:
-            return "LLM error: permanent failure"
+            raise NIMServerError(500, "permanent failure")
 
         def validate(response: str) -> dict[str, str]:
             return {}

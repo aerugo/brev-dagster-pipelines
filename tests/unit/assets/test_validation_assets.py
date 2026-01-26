@@ -351,14 +351,20 @@ class TestValidatePlatform:
         minio_result = {"component": "minio", "passed": True, "tests": [], "error": None}
         lakefs_result = {"component": "lakefs", "passed": True, "tests": [], "error": None}
         nim_result = {"component": "nim", "passed": True, "tests": [], "error": None}
+        weaviate_result = {"component": "weaviate", "passed": True, "tests": [], "error": None}
 
         result = validate_platform(
-            asset_context, minio_result, lakefs_result, nim_result, mock_minio_resource
+            context=asset_context,
+            validate_minio=minio_result,
+            validate_lakefs=lakefs_result,
+            validate_nim=nim_result,
+            validate_weaviate=weaviate_result,
+            minio=mock_minio_resource,
         )
 
         assert result["validation_run"]["overall_status"] == "PASSED"
-        assert result["validation_run"]["passed_components"] == 3
-        assert result["validation_run"]["total_components"] == 3
+        assert result["validation_run"]["passed_components"] == 4
+        assert result["validation_run"]["total_components"] == 4
         assert "timestamp" in result["validation_run"]
 
     def test_validate_platform_one_failure(
@@ -370,13 +376,19 @@ class TestValidatePlatform:
         minio_result = {"component": "minio", "passed": True, "tests": [], "error": None}
         lakefs_result = {"component": "lakefs", "passed": False, "tests": [], "error": "Failed"}
         nim_result = {"component": "nim", "passed": True, "tests": [], "error": None}
+        weaviate_result = {"component": "weaviate", "passed": True, "tests": [], "error": None}
 
         result = validate_platform(
-            asset_context, minio_result, lakefs_result, nim_result, mock_minio_resource
+            context=asset_context,
+            validate_minio=minio_result,
+            validate_lakefs=lakefs_result,
+            validate_nim=nim_result,
+            validate_weaviate=weaviate_result,
+            minio=mock_minio_resource,
         )
 
         assert result["validation_run"]["overall_status"] == "FAILED"
-        assert result["validation_run"]["passed_components"] == 2
+        assert result["validation_run"]["passed_components"] == 3
 
     def test_validate_platform_all_fail(
         self,
@@ -387,9 +399,15 @@ class TestValidatePlatform:
         minio_result = {"component": "minio", "passed": False, "tests": [], "error": "Err1"}
         lakefs_result = {"component": "lakefs", "passed": False, "tests": [], "error": "Err2"}
         nim_result = {"component": "nim", "passed": False, "tests": [], "error": "Err3"}
+        weaviate_result = {"component": "weaviate", "passed": False, "tests": [], "error": "Err4"}
 
         result = validate_platform(
-            asset_context, minio_result, lakefs_result, nim_result, mock_minio_resource
+            context=asset_context,
+            validate_minio=minio_result,
+            validate_lakefs=lakefs_result,
+            validate_nim=nim_result,
+            validate_weaviate=weaviate_result,
+            minio=mock_minio_resource,
         )
 
         assert result["validation_run"]["overall_status"] == "FAILED"
@@ -406,9 +424,15 @@ class TestValidatePlatform:
         minio_result = {"component": "minio", "passed": True, "tests": [], "error": None}
         lakefs_result = {"component": "lakefs", "passed": True, "tests": [], "error": None}
         nim_result = {"component": "nim", "passed": True, "tests": [], "error": None}
+        weaviate_result = {"component": "weaviate", "passed": True, "tests": [], "error": None}
 
         result = validate_platform(
-            asset_context, minio_result, lakefs_result, nim_result, mock_minio_resource
+            context=asset_context,
+            validate_minio=minio_result,
+            validate_lakefs=lakefs_result,
+            validate_nim=nim_result,
+            validate_weaviate=weaviate_result,
+            minio=mock_minio_resource,
         )
 
         # Verify bucket was ensured
@@ -429,9 +453,15 @@ class TestValidatePlatform:
         minio_result = {"component": "minio", "passed": True, "tests": [], "error": None}
         lakefs_result = {"component": "lakefs", "passed": True, "tests": [], "error": None}
         nim_result = {"component": "nim", "passed": True, "tests": [], "error": None}
+        weaviate_result = {"component": "weaviate", "passed": True, "tests": [], "error": None}
 
         result = validate_platform(
-            asset_context, minio_result, lakefs_result, nim_result, mock_minio_resource
+            context=asset_context,
+            validate_minio=minio_result,
+            validate_lakefs=lakefs_result,
+            validate_nim=nim_result,
+            validate_weaviate=weaviate_result,
+            minio=mock_minio_resource,
         )
 
         # Should still succeed but note storage failure
@@ -446,15 +476,22 @@ class TestValidatePlatform:
         minio_result = {"component": "minio", "passed": True, "tests": [], "error": None}
         lakefs_result = {"component": "lakefs", "passed": False, "tests": [], "error": None}
         nim_result = {"component": "nim", "passed": True, "tests": [], "error": None}
+        weaviate_result = {"component": "weaviate", "passed": True, "tests": [], "error": None}
 
         result = validate_platform(
-            asset_context, minio_result, lakefs_result, nim_result, mock_minio_resource
+            context=asset_context,
+            validate_minio=minio_result,
+            validate_lakefs=lakefs_result,
+            validate_nim=nim_result,
+            validate_weaviate=weaviate_result,
+            minio=mock_minio_resource,
         )
 
         summary = result["summary"]
         assert "PASSED" in summary["minio"]
         assert "FAILED" in summary["lakefs"]
         assert "PASSED" in summary["nim"]
+        assert "PASSED" in summary["weaviate"]
 
 
 class TestQuickHealthCheck:
@@ -466,19 +503,26 @@ class TestQuickHealthCheck:
         mock_minio_resource: MagicMock,
         mock_lakefs_resource: MagicMock,
         mock_nim_resource: MagicMock,
+        mock_weaviate_resource: MagicMock,
     ) -> None:
         """Test quick_health_check when all services are healthy."""
+        # Configure Weaviate mock for healthy state
+        mock_client = mock_weaviate_resource.get_client.return_value
+        mock_client.is_ready.return_value = True
+
         result = quick_health_check(
-            asset_context,
-            mock_minio_resource,
-            mock_lakefs_resource,
-            mock_nim_resource,
+            context=asset_context,
+            minio=mock_minio_resource,
+            lakefs=mock_lakefs_resource,
+            nim=mock_nim_resource,
+            weaviate=mock_weaviate_resource,
         )
 
         assert result["overall_status"] == "healthy"
         assert result["services"]["minio"]["status"] == "healthy"
         assert result["services"]["lakefs"]["status"] == "healthy"
         assert result["services"]["nim"]["status"] == "healthy"
+        assert result["services"]["weaviate"]["status"] == "healthy"
         assert "timestamp" in result
         assert result["duration_ms"] > 0
 
@@ -488,21 +532,26 @@ class TestQuickHealthCheck:
         mock_minio_resource: MagicMock,
         mock_lakefs_resource: MagicMock,
         mock_nim_resource: MagicMock,
+        mock_weaviate_resource: MagicMock,
     ) -> None:
         """Test quick_health_check when one service is unhealthy."""
         mock_nim_resource.health_check.return_value = False
+        mock_weaviate_client = mock_weaviate_resource.get_client.return_value
+        mock_weaviate_client.is_ready.return_value = True
 
         result = quick_health_check(
-            asset_context,
-            mock_minio_resource,
-            mock_lakefs_resource,
-            mock_nim_resource,
+            context=asset_context,
+            minio=mock_minio_resource,
+            lakefs=mock_lakefs_resource,
+            nim=mock_nim_resource,
+            weaviate=mock_weaviate_resource,
         )
 
         assert result["overall_status"] == "unhealthy"
         assert result["services"]["minio"]["status"] == "healthy"
         assert result["services"]["lakefs"]["status"] == "healthy"
         assert result["services"]["nim"]["status"] == "unhealthy"
+        assert result["services"]["weaviate"]["status"] == "healthy"
 
     def test_quick_health_check_minio_error(
         self,
@@ -510,16 +559,20 @@ class TestQuickHealthCheck:
         mock_minio_resource: MagicMock,
         mock_lakefs_resource: MagicMock,
         mock_nim_resource: MagicMock,
+        mock_weaviate_resource: MagicMock,
     ) -> None:
         """Test quick_health_check handles MinIO connection error."""
         mock_client = mock_minio_resource.get_client.return_value
         mock_client.list_buckets.side_effect = ConnectionError("Connection refused")
+        mock_weaviate_client = mock_weaviate_resource.get_client.return_value
+        mock_weaviate_client.is_ready.return_value = True
 
         result = quick_health_check(
-            asset_context,
-            mock_minio_resource,
-            mock_lakefs_resource,
-            mock_nim_resource,
+            context=asset_context,
+            minio=mock_minio_resource,
+            lakefs=mock_lakefs_resource,
+            nim=mock_nim_resource,
+            weaviate=mock_weaviate_resource,
         )
 
         assert result["overall_status"] == "unhealthy"
@@ -533,15 +586,19 @@ class TestQuickHealthCheck:
         mock_minio_resource: MagicMock,
         mock_lakefs_resource: MagicMock,
         mock_nim_resource: MagicMock,
+        mock_weaviate_resource: MagicMock,
     ) -> None:
         """Test quick_health_check handles LakeFS error."""
         mock_lakefs_resource.health_check.side_effect = TimeoutError("Request timed out")
+        mock_weaviate_client = mock_weaviate_resource.get_client.return_value
+        mock_weaviate_client.is_ready.return_value = True
 
         result = quick_health_check(
-            asset_context,
-            mock_minio_resource,
-            mock_lakefs_resource,
-            mock_nim_resource,
+            context=asset_context,
+            minio=mock_minio_resource,
+            lakefs=mock_lakefs_resource,
+            nim=mock_nim_resource,
+            weaviate=mock_weaviate_resource,
         )
 
         assert result["overall_status"] == "unhealthy"
@@ -554,18 +611,21 @@ class TestQuickHealthCheck:
         mock_minio_resource: MagicMock,
         mock_lakefs_resource: MagicMock,
         mock_nim_resource: MagicMock,
+        mock_weaviate_resource: MagicMock,
     ) -> None:
         """Test quick_health_check when all services fail."""
         mock_client = mock_minio_resource.get_client.return_value
         mock_client.list_buckets.side_effect = Exception("MinIO error")
         mock_lakefs_resource.health_check.side_effect = Exception("LakeFS error")
         mock_nim_resource.health_check.side_effect = Exception("NIM error")
+        mock_weaviate_resource.get_client.side_effect = Exception("Weaviate error")
 
         result = quick_health_check(
-            asset_context,
-            mock_minio_resource,
-            mock_lakefs_resource,
-            mock_nim_resource,
+            context=asset_context,
+            minio=mock_minio_resource,
+            lakefs=mock_lakefs_resource,
+            nim=mock_nim_resource,
+            weaviate=mock_weaviate_resource,
         )
 
         assert result["overall_status"] == "unhealthy"
@@ -579,17 +639,21 @@ class TestQuickHealthCheck:
         mock_minio_resource: MagicMock,
         mock_lakefs_resource: MagicMock,
         mock_nim_resource: MagicMock,
+        mock_weaviate_resource: MagicMock,
     ) -> None:
         """Test quick_health_check truncates long error messages."""
         long_error = "A" * 200  # Longer than 100 char limit
         mock_client = mock_minio_resource.get_client.return_value
         mock_client.list_buckets.side_effect = Exception(long_error)
+        mock_weaviate_client = mock_weaviate_resource.get_client.return_value
+        mock_weaviate_client.is_ready.return_value = True
 
         result = quick_health_check(
-            asset_context,
-            mock_minio_resource,
-            mock_lakefs_resource,
-            mock_nim_resource,
+            context=asset_context,
+            minio=mock_minio_resource,
+            lakefs=mock_lakefs_resource,
+            nim=mock_nim_resource,
+            weaviate=mock_weaviate_resource,
         )
 
         # Error should be truncated to 100 chars

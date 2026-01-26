@@ -37,6 +37,12 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from brev_pipelines.resources.nim import (
+    NIMError,
+    NIMRateLimitError as NIMRateLimitException,
+    NIMServerError as NIMServerException,
+    NIMTimeoutError as NIMTimeoutException,
+)
 from brev_pipelines.types import (
     MONETARY_STANCE_SCALE,
     OUTLOOK_SCALE,
@@ -248,12 +254,6 @@ def retry_with_backoff(
             # Make the LLM call
             raw_response = fn()
 
-            # Check for error responses from NIMResource
-            if raw_response.startswith("LLM error:"):
-                error_msg = raw_response[len("LLM error:") :].strip()
-                error_class = _classify_llm_error(error_msg)
-                raise error_class(error_msg)
-
             # Validate and parse the response
             parsed_data = validate_fn(raw_response)
 
@@ -268,25 +268,46 @@ def retry_with_backoff(
                 duration_ms=duration_ms,
             )
 
+        except NIMTimeoutException as e:
+            # Convert NIM timeout to our LLMTimeoutError
+            last_error = LLMTimeoutError(str(e))
+            last_error_type = "LLMTimeoutError"
+
+        except NIMRateLimitException as e:
+            # Convert NIM rate limit to our LLMRateLimitError
+            last_error = LLMRateLimitError(str(e))
+            last_error_type = "LLMRateLimitError"
+
+        except NIMServerException as e:
+            # Convert NIM server error to our LLMServerError
+            last_error = LLMServerError(str(e))
+            last_error_type = "LLMServerError"
+
+        except NIMError as e:
+            # Other NIM errors are retryable
+            last_error = RetryableError(str(e))
+            last_error_type = "RetryableError"
+
         except RetryableError as e:
             last_error = e
             last_error_type = type(e).__name__
-
-            if attempt < config.max_retries - 1:
-                delay = calculate_backoff(attempt, config)
-                if logger:
-                    logger.warning(
-                        f"LLM call failed for {record_id} "
-                        f"(attempt {attempt + 1}/{config.max_retries}): "
-                        f"{e}. Retrying in {delay:.1f}s..."
-                    )
-                time.sleep(delay)
 
         except Exception as e:
             # Non-retryable error - break immediately
             last_error = e
             last_error_type = "unexpected_error"
             break
+
+        # Retry logic for retryable errors
+        if attempt < config.max_retries - 1:
+            delay = calculate_backoff(attempt, config)
+            if logger:
+                logger.warning(
+                    f"LLM call failed for {record_id} "
+                    f"(attempt {attempt + 1}/{config.max_retries}): "
+                    f"{last_error}. Retrying in {delay:.1f}s..."
+                )
+            time.sleep(delay)
 
     # All retries exhausted - use fallback
     duration_ms = int((time.time() - start_time) * 1000)
@@ -383,9 +404,6 @@ def validate_summary_response(response: str) -> str:
     Raises:
         ValidationError: If response is invalid.
     """
-    if response.startswith("LLM error:"):
-        raise ValidationError(response)
-
     stripped = response.strip()
     if len(stripped) < 50:
         raise ValidationError(f"Summary too short ({len(stripped)} chars)")

@@ -32,6 +32,7 @@ import polars as pl
 
 from brev_pipelines.config import PipelineConfig
 from brev_pipelines.io_managers.checkpoint import LLMCheckpointManager, process_with_checkpoint
+from brev_pipelines.resources.k8s_scaler import K8sScalerResource
 from brev_pipelines.resources.lakefs import (
     LakeFSConnectionError,
     LakeFSError,
@@ -43,7 +44,6 @@ from brev_pipelines.resources.llm_retry import (
     validate_classification_response,
     validate_summary_response,
 )
-from brev_pipelines.resources.k8s_scaler import K8sScalerResource
 from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.nim import NIMResource
 from brev_pipelines.resources.nim_embedding import NIMEmbeddingResource
@@ -296,6 +296,7 @@ def speech_embeddings(
         cleaned_speeches: Cleaned DataFrame with speech text.
         nim_embedding: NIM embedding resource for vector generation.
         minio: MinIO resource for checkpoint storage.
+        k8s_scaler: Kubernetes scaler to manage GPU resources.
 
     Returns:
         Tuple of (DataFrame, list of 1024-dim embedding vectors).

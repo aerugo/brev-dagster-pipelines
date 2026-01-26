@@ -15,6 +15,7 @@ from brev_pipelines.assets.health import health_assets
 from brev_pipelines.assets.synthetic_speeches import synthetic_speeches_assets
 from brev_pipelines.assets.validation import validation_assets
 from brev_pipelines.jobs import all_jobs
+from brev_pipelines.resources.k8s_scaler import K8sScalerResource
 from brev_pipelines.resources.lakefs import LakeFSResource
 from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.nim import NIMResource
@@ -118,6 +119,10 @@ defs = Definitions(
             port=_env_int("WEAVIATE_PORT", 80),
             grpc_host=_env("WEAVIATE_GRPC_HOST", "weaviate-grpc.weaviate.svc.cluster.local"),
             grpc_port=_env_int("WEAVIATE_GRPC_PORT", 50051),
+        ),
+        "k8s_scaler": K8sScalerResource(
+            in_cluster=_is_running_in_kubernetes(),
+            ready_timeout=_env_int("K8S_READY_TIMEOUT", 600),
         ),
     },
 )

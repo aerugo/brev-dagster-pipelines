@@ -5,6 +5,8 @@ EnvVar.get_value() resolves at definition time; EnvVar() without get_value()
 is used for secrets (MINIO keys, LakeFS keys) which Dagster resolves at runtime.
 """
 
+import os
+
 from dagster import Definitions, EnvVar
 
 from brev_pipelines.assets.central_bank_speeches import central_bank_speeches_assets
@@ -32,6 +34,30 @@ def _env_int(name: str, default: int) -> int:
     return int(value) if value else default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    """Get environment variable as bool with default."""
+    value = EnvVar(name).get_value()
+    if value is None:
+        return default
+    return value.lower() in ("true", "1", "yes")
+
+
+def _is_running_in_kubernetes() -> bool:
+    """Detect if running inside a Kubernetes pod.
+
+    Kubernetes automatically sets KUBERNETES_SERVICE_HOST in all pods.
+    """
+    return "KUBERNETES_SERVICE_HOST" in os.environ
+
+
+# Auto-detect environment: use mock fallback only in local dev (not in k8s)
+# Can be overridden with USE_MOCK_FALLBACK env var
+_use_mock_fallback = _env_bool(
+    "USE_MOCK_FALLBACK",
+    default=not _is_running_in_kubernetes(),
+)
+
+
 defs = Definitions(
     assets=[
         *demo_assets,
@@ -55,6 +81,7 @@ defs = Definitions(
         ),
         "nim": NIMResource(
             endpoint=_env("NIM_ENDPOINT", "http://nim-llm.nvidia-ai.svc.cluster.local:8000"),
+            use_mock_fallback=_use_mock_fallback,
         ),
         "nim_reasoning": NIMResource(
             endpoint=_env(
@@ -62,12 +89,14 @@ defs = Definitions(
             ),
             model="openai/gpt-oss-120b",
             timeout=600,  # Longer timeout for large reasoning model
+            use_mock_fallback=_use_mock_fallback,
         ),
         "nim_embedding": NIMEmbeddingResource(
             endpoint=_env(
                 "NIM_EMBEDDING_ENDPOINT",
                 "http://nvidia-nim-embedding.nvidia-nim.svc.cluster.local:8000",
             ),
+            use_mock_fallback=_use_mock_fallback,
         ),
         "safe_synth": SafeSynthesizerResource(
             namespace=_env("SAFE_SYNTH_NAMESPACE", "nvidia-ai"),
@@ -82,6 +111,7 @@ defs = Definitions(
             nds_token=_env("HF_TOKEN", ""),
             nds_repo=_env("NDS_REPO", "admin/central-bank-speeches"),
             priority_class=_env("SAFE_SYNTH_PRIORITY", "batch-high"),
+            use_mock_fallback=_use_mock_fallback,
         ),
         "weaviate": WeaviateResource(
             host=_env("WEAVIATE_HOST", "weaviate.weaviate.svc.cluster.local"),

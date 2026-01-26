@@ -25,7 +25,7 @@ Trial Run Mode:
 
 import io
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import dagster as dg
 import polars as pl
@@ -43,7 +43,12 @@ from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.nim import NIMResource
 from brev_pipelines.resources.nim_embedding import NIMEmbeddingResource
 from brev_pipelines.resources.weaviate import WeaviateResource
-from brev_pipelines.types import SpeechClassification, WeaviatePropertyDef
+from brev_pipelines.types import (
+    LLMAssetMetadata,
+    LLMFailureBreakdown,
+    SpeechClassification,
+    WeaviatePropertyDef,
+)
 
 # Collection schema for Weaviate
 SPEECHES_SCHEMA: list[WeaviatePropertyDef] = [
@@ -560,20 +565,95 @@ Classification:"""
         how="left",
     )
 
-    # Log classification statistics
+    # Calculate classification statistics
     total = len(df)
-    failed_count = df.filter(pl.col("_llm_status") == "failed").height
+    failed_df = df.filter(pl.col("_llm_status") == "failed")
+    failed_count = failed_df.height
     success_count = total - failed_count
+    success_rate = f"{100 * success_count / total:.1f}%" if total > 0 else "N/A"
 
-    context.log.info("Classification complete:")
-    context.log.info(f"  Total processed: {total}")
-    context.log.info(f"  Successful: {success_count} ({100*success_count/total:.1f}%)")
-    context.log.info(f"  Failed (using fallback): {failed_count} ({100*failed_count/total:.1f}%)")
+    # Calculate failure breakdown by error type
+    failure_breakdown: LLMFailureBreakdown = {
+        "ValidationError": 0,
+        "LLMTimeoutError": 0,
+        "LLMRateLimitError": 0,
+        "LLMServerError": 0,
+        "unexpected_error": 0,
+    }
+    if failed_count > 0:
+        error_types = failed_df["_llm_error"].to_list()
+        for error in error_types:
+            error_str = str(error) if error else ""
+            if "ValidationError" in error_str:
+                failure_breakdown["ValidationError"] += 1
+            elif "LLMTimeoutError" in error_str or "timeout" in error_str.lower():
+                failure_breakdown["LLMTimeoutError"] += 1
+            elif "LLMRateLimitError" in error_str or "429" in error_str:
+                failure_breakdown["LLMRateLimitError"] += 1
+            elif "LLMServerError" in error_str or any(
+                code in error_str for code in ("500", "502", "503", "504")
+            ):
+                failure_breakdown["LLMServerError"] += 1
+            else:
+                failure_breakdown["unexpected_error"] += 1
+
+    # Calculate average attempts
+    avg_attempts = df.select(pl.col("_llm_attempts").mean()).item() or 1.0
+
+    # Get failed references (limit to 100)
+    failed_refs = (
+        failed_df["reference"].to_list()[:100] if failed_count > 0 else []
+    )
+
+    # Build metadata
+    metadata: LLMAssetMetadata = {
+        "total_processed": total,
+        "successful": success_count,
+        "failed": failed_count,
+        "success_rate": success_rate,
+        "failed_references": [str(ref) for ref in failed_refs],
+        "failure_breakdown": failure_breakdown,
+        "avg_attempts": float(avg_attempts),
+        "total_duration_ms": 0,  # Not tracked at asset level
+    }
+
+    # Add metadata to Dagster context (single call - Dagster limitation)
+    output_metadata: dict[str, object] = {
+        "total_processed": total,
+        "successful": success_count,
+        "failed": failed_count,
+        "success_rate": success_rate,
+        "failure_breakdown": dict(failure_breakdown),
+        "avg_attempts": round(metadata["avg_attempts"], 2),
+    }
+    if failed_count > 0:
+        output_metadata["failed_references"] = metadata["failed_references"][:100]
+    context.add_output_metadata(output_metadata)
+
+    # Structured logging
+    context.log.info("=" * 60)
+    context.log.info("CLASSIFICATION SUMMARY")
+    context.log.info("=" * 60)
+    context.log.info(f"Total records:     {total}")
+    context.log.info(f"Successful:        {success_count} ({success_rate})")
+    context.log.info(f"Failed (fallback): {failed_count}")
+    context.log.info(f"Average attempts:  {metadata['avg_attempts']:.2f}")
 
     if failed_count > 0:
-        failed_refs = df.filter(pl.col("_llm_status") == "failed")["reference"].to_list()[:10]
-        context.log.warning(f"  Failed references (first 10): {failed_refs}")
+        context.log.info("-" * 40)
+        context.log.info("FAILURE BREAKDOWN:")
+        breakdown_dict = cast("dict[str, int]", dict(failure_breakdown))
+        for error_type, count in breakdown_dict.items():
+            if count > 0:
+                context.log.info(f"  {error_type}: {count}")
+        context.log.info("-" * 40)
+        context.log.warning(
+            f"Failed references (first 10): {metadata['failed_references'][:10]}"
+        )
 
+    context.log.info("=" * 60)
+
+    # Classification distribution stats
     context.log.info(f"Monetary stance distribution: {df['monetary_stance'].value_counts()}")
     context.log.info(f"Trade stance distribution: {df['trade_stance'].value_counts()}")
     tariff_count = df.filter(pl.col("tariff_mention") == 1).height
@@ -726,20 +806,83 @@ Generate a COMPACT bullet-point summary (under 1000 characters total):"""
         msg = "Summarization checkpoint returned no results"
         raise RuntimeError(msg)
 
-    # Log summary statistics with dead letter info
+    # Calculate summary statistics
     total = len(results_df)
-    failed_count = results_df.filter(pl.col("_llm_status") == "failed").height
+    failed_df = results_df.filter(pl.col("_llm_status") == "failed")
+    failed_count = failed_df.height
     success_count = total - failed_count
+    success_rate = f"{100 * success_count / total:.1f}%" if total > 0 else "N/A"
 
-    context.log.info("Summarization complete:")
-    context.log.info(f"  Total processed: {total}")
-    context.log.info(f"  Successful: {success_count} ({100*success_count/total:.1f}%)")
-    context.log.info(f"  Failed (using fallback): {failed_count} ({100*failed_count/total:.1f}%)")
+    # Calculate failure breakdown by error type
+    failure_breakdown: LLMFailureBreakdown = {
+        "ValidationError": 0,
+        "LLMTimeoutError": 0,
+        "LLMRateLimitError": 0,
+        "LLMServerError": 0,
+        "unexpected_error": 0,
+    }
+    if failed_count > 0:
+        error_types = failed_df["_llm_error"].to_list()
+        for error in error_types:
+            error_str = str(error) if error else ""
+            if "ValidationError" in error_str:
+                failure_breakdown["ValidationError"] += 1
+            elif "LLMTimeoutError" in error_str or "timeout" in error_str.lower():
+                failure_breakdown["LLMTimeoutError"] += 1
+            elif "LLMRateLimitError" in error_str or "429" in error_str:
+                failure_breakdown["LLMRateLimitError"] += 1
+            elif "LLMServerError" in error_str or any(
+                code in error_str for code in ("500", "502", "503", "504")
+            ):
+                failure_breakdown["LLMServerError"] += 1
+            else:
+                failure_breakdown["unexpected_error"] += 1
+
+    # Calculate average attempts
+    avg_attempts = results_df.select(pl.col("_llm_attempts").mean()).item() or 1.0
+
+    # Get failed references (limit to 100)
+    failed_refs = (
+        failed_df["reference"].to_list()[:100] if failed_count > 0 else []
+    )
+
+    # Add metadata to Dagster context (single call - Dagster limitation)
+    output_metadata: dict[str, object] = {
+        "total_processed": total,
+        "successful": success_count,
+        "failed": failed_count,
+        "success_rate": success_rate,
+        "failure_breakdown": dict(failure_breakdown),
+        "avg_attempts": round(float(avg_attempts), 2),
+    }
+    if failed_count > 0:
+        output_metadata["failed_references"] = [str(ref) for ref in failed_refs][:100]
+    context.add_output_metadata(output_metadata)
+
+    # Structured logging
+    context.log.info("=" * 60)
+    context.log.info("SUMMARIZATION SUMMARY")
+    context.log.info("=" * 60)
+    context.log.info(f"Total records:     {total}")
+    context.log.info(f"Successful:        {success_count} ({success_rate})")
+    context.log.info(f"Failed (fallback): {failed_count}")
+    context.log.info(f"Average attempts:  {float(avg_attempts):.2f}")
 
     if failed_count > 0:
-        failed_refs = results_df.filter(pl.col("_llm_status") == "failed")["reference"].to_list()[:10]
-        context.log.warning(f"  Failed references (first 10): {failed_refs}")
+        context.log.info("-" * 40)
+        context.log.info("FAILURE BREAKDOWN:")
+        breakdown_dict = cast("dict[str, int]", dict(failure_breakdown))
+        for error_type, count in breakdown_dict.items():
+            if count > 0:
+                context.log.info(f"  {error_type}: {count}")
+        context.log.info("-" * 40)
+        context.log.warning(
+            f"Failed references (first 10): {[str(ref) for ref in failed_refs[:10]]}"
+        )
 
+    context.log.info("=" * 60)
+
+    # Summary length statistics
     summaries = results_df["summary"].to_list()
     summary_lengths = [len(s) for s in summaries]
     avg_len = sum(summary_lengths) / len(summary_lengths) if summary_lengths else 0

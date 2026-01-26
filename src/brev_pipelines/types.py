@@ -565,6 +565,58 @@ OUTLOOK_SCALE: dict[str, int] = {
 
 
 # =============================================================================
+# LLM Observability Types
+# =============================================================================
+
+
+class LLMFailureBreakdown(TypedDict):
+    """Breakdown of LLM failures by error type.
+
+    Used for tracking failure statistics in Dagster asset metadata.
+
+    Attributes:
+        ValidationError: Count of validation failures (invalid JSON, missing fields).
+        LLMTimeoutError: Count of timeout failures.
+        LLMRateLimitError: Count of rate limit (429) failures.
+        LLMServerError: Count of server (5xx) failures.
+        unexpected_error: Count of unexpected/unclassified failures.
+    """
+
+    ValidationError: int
+    LLMTimeoutError: int
+    LLMRateLimitError: int
+    LLMServerError: int
+    unexpected_error: int
+
+
+class LLMAssetMetadata(TypedDict):
+    """Metadata for LLM-powered assets with failure tracking.
+
+    Used for Dagster asset metadata output via context.add_output_metadata().
+    Provides observability into LLM call success rates and failure patterns.
+
+    Attributes:
+        total_processed: Total number of records processed.
+        successful: Number of successful LLM calls.
+        failed: Number of failed LLM calls (using fallback).
+        success_rate: Percentage as formatted string (e.g., "95.0%").
+        failed_references: List of record IDs that failed (limited to 100).
+        failure_breakdown: Counts by error type.
+        avg_attempts: Average number of attempts per record.
+        total_duration_ms: Total processing time in milliseconds.
+    """
+
+    total_processed: int
+    successful: int
+    failed: int
+    success_rate: str
+    failed_references: list[str]
+    failure_breakdown: LLMFailureBreakdown
+    avg_attempts: float
+    total_duration_ms: int
+
+
+# =============================================================================
 # Type Aliases
 # =============================================================================
 

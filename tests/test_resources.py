@@ -28,16 +28,16 @@ def test_lakefs_resource_init():
 
 
 def test_nim_resource_init():
-    """Test NIM resource initialization."""
+    """Test NIM resource initialization with custom model."""
     from brev_pipelines.resources.nim import NIMResource
 
     resource = NIMResource(
         endpoint="http://localhost:8000",
-        model="meta/llama3-8b-instruct",
+        model="meta/llama-3.1-8b-instruct",
         timeout=30,
     )
     assert resource.endpoint == "http://localhost:8000"
-    assert resource.model == "meta/llama3-8b-instruct"
+    assert resource.model == "meta/llama-3.1-8b-instruct"
 
 
 def test_nim_resource_default_model():
@@ -45,7 +45,7 @@ def test_nim_resource_default_model():
     from brev_pipelines.resources.nim import NIMResource
 
     resource = NIMResource(endpoint="http://localhost:8000")
-    assert resource.model == "meta/llama3-8b-instruct"
+    assert resource.model == "meta/llama-3.1-8b-instruct"
 
 
 def test_nim_embedding_resource_init():
@@ -170,9 +170,7 @@ class TestSafeSynthesizerResource:
         """Test custom service endpoint."""
         from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
 
-        resource = SafeSynthesizerResource(
-            service_endpoint="http://custom-synth:9000"
-        )
+        resource = SafeSynthesizerResource(service_endpoint="http://custom-synth:9000")
         assert resource.service_endpoint == "http://custom-synth:9000"
 
     def test_image_default(self):

@@ -32,15 +32,17 @@ def test_cleaned_data_adds_tier():
     from brev_pipelines.assets.demo import cleaned_data
 
     context = build_asset_context()
-    raw_df = pd.DataFrame({
-        "id": ["CUST-0001"],
-        "name": ["Test"],
-        "age": [30],
-        "region": ["north"],
-        "category": ["Premium"],
-        "spend": [5000.0],
-        "active": [True],
-    })
+    raw_df = pd.DataFrame(
+        {
+            "id": ["CUST-0001"],
+            "name": ["Test"],
+            "age": [30],
+            "region": ["north"],
+            "category": ["Premium"],
+            "spend": [5000.0],
+            "active": [True],
+        }
+    )
 
     df = cleaned_data(context, raw_df)
     assert "tier" in df.columns
@@ -52,15 +54,17 @@ def test_cleaned_data_caps_spend():
     from brev_pipelines.assets.demo import cleaned_data
 
     context = build_asset_context()
-    raw_df = pd.DataFrame({
-        "id": ["CUST-0001"],
-        "name": ["Test"],
-        "age": [30],
-        "region": ["North"],
-        "category": ["Premium"],
-        "spend": [15000.0],  # Above cap
-        "active": [True],
-    })
+    raw_df = pd.DataFrame(
+        {
+            "id": ["CUST-0001"],
+            "name": ["Test"],
+            "age": [30],
+            "region": ["North"],
+            "category": ["Premium"],
+            "spend": [15000.0],  # Above cap
+            "active": [True],
+        }
+    )
 
     df = cleaned_data(context, raw_df)
     assert df["spend"].iloc[0] == 9000  # Capped
@@ -71,15 +75,17 @@ def test_cleaned_data_tier_assignment():
     from brev_pipelines.assets.demo import cleaned_data
 
     context = build_asset_context()
-    raw_df = pd.DataFrame({
-        "id": ["CUST-0001", "CUST-0002", "CUST-0003"],
-        "name": ["Low", "Med", "High"],
-        "age": [30, 40, 50],
-        "region": ["North", "South", "East"],
-        "category": ["Basic", "Standard", "Premium"],
-        "spend": [500.0, 3000.0, 7000.0],
-        "active": [True, True, True],
-    })
+    raw_df = pd.DataFrame(
+        {
+            "id": ["CUST-0001", "CUST-0002", "CUST-0003"],
+            "name": ["Low", "Med", "High"],
+            "age": [30, 40, 50],
+            "region": ["North", "South", "East"],
+            "category": ["Basic", "Standard", "Premium"],
+            "spend": [500.0, 3000.0, 7000.0],
+            "active": [True, True, True],
+        }
+    )
 
     df = cleaned_data(context, raw_df)
     assert df["tier"].iloc[0] == "Low Value"

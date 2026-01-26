@@ -592,8 +592,11 @@ def synthetic_embeddings(
     Uses local NIM embedding model. Embeds the compact summary which captures
     the semantic content of each synthetic record.
 
-    Uses checkpointing to save progress every 32 rows, allowing recovery
-    from failures without reprocessing completed embeddings.
+    In production: Uses checkpointing to save progress every 32 rows,
+    allowing recovery from failures without reprocessing completed embeddings.
+
+    In local dev: Skips checkpointing when NIM service is unavailable and
+    mock embeddings are being used (they're instant and deterministic).
 
     Args:
         context: Dagster execution context for logging.
@@ -606,7 +609,34 @@ def synthetic_embeddings(
     """
     df, _ = synthetic_summaries
 
-    # Create checkpoint manager for embeddings
+    # Check if NIM service is available (determines mock mode)
+    use_mock = nim_embedding.use_mock_fallback and not nim_embedding.health_check()
+
+    if use_mock:
+        # Mock mode: skip checkpointing, generate all embeddings directly
+        context.log.info(
+            f"Mock mode: generating {len(df)} embeddings without checkpointing"
+        )
+
+        # Prepare all texts
+        texts: list[str] = []
+        for row in df.iter_rows(named=True):
+            title = row.get("title", "") or ""
+            summary = row.get("summary", "") or ""
+            combined = f"{title}\n\n{summary}"
+            texts.append(combined)
+
+        # Generate all embeddings in one batch (mock is instant)
+        embeddings = nim_embedding.embed_texts(texts, batch_size=32)
+        context.log.info(
+            f"Generated {len(embeddings)} mock embeddings, dimension: {len(embeddings[0])}"
+        )
+
+        return (df, embeddings)
+
+    # Production mode: use checkpointing for recovery
+    context.log.info("Production mode: using checkpointing for embedding generation")
+
     checkpoint_mgr = LLMCheckpointManager(
         minio=minio,
         asset_name="synthetic_embeddings",
@@ -630,12 +660,14 @@ def synthetic_embeddings(
     # Process in batches with checkpointing
     batch_size = 32
     rows = to_process.to_dicts()
+    total_batches = (len(rows) + batch_size - 1) // batch_size
+    log_interval = max(1, total_batches // 10)  # Log ~10 times during processing
 
-    for i in range(0, len(rows), batch_size):
+    for batch_num, i in enumerate(range(0, len(rows), batch_size)):
         batch = rows[i : i + batch_size]
 
         # Prepare texts for this batch
-        texts: list[str] = []
+        texts = []
         for row in batch:
             title = row.get("title", "") or ""
             summary = row.get("summary", "") or ""
@@ -657,7 +689,11 @@ def synthetic_embeddings(
                 force=(j == len(batch) - 1),
             )  # Force save at end of batch
 
-        context.log.info(f"Checkpoint saved: {checkpoint_mgr.processed_count} embeddings complete")
+        # Log progress at intervals
+        if batch_num % log_interval == 0 or batch_num == total_batches - 1:
+            context.log.info(
+                f"Embedding progress: {checkpoint_mgr.processed_count}/{len(rows)} complete"
+            )
 
     # Finalize and get all results
     final_checkpoint = checkpoint_mgr.finalize()

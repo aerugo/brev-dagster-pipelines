@@ -908,20 +908,26 @@ def synthetic_summaries_snapshot(
     config: PipelineConfig,
     synthetic_summaries: tuple[pl.DataFrame, dict[str, Any]],
     lakefs: LakeFSResource,
+    synthetic_validation_report: dict[str, Any],  # Dependency to prevent concurrent commits
 ) -> dict[str, Any]:
     """Persist synthetic summaries to LakeFS for debugging and recovery.
 
     Stores the Safe Synthesizer generated summaries with their metadata.
+
+    Depends on synthetic_validation_report to ensure sequential LakeFS commits
+    (prevents "predicate failed" errors from concurrent commits).
 
     Args:
         context: Dagster execution context for logging.
         config: Pipeline configuration (is_trial for path selection).
         synthetic_summaries: Tuple of (DataFrame, evaluation metrics).
         lakefs: LakeFS resource for data versioning.
+        synthetic_validation_report: Previous snapshot (unused, forces sequential execution).
 
     Returns:
         Dictionary with storage metadata.
     """
+    del synthetic_validation_report  # Unused, exists only to enforce dependency
     from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
 
     df, evaluation = synthetic_summaries
@@ -1005,20 +1011,26 @@ def synthetic_embeddings_snapshot(
     config: PipelineConfig,
     synthetic_embeddings: tuple[pl.DataFrame, list[list[float]]],
     lakefs: LakeFSResource,
+    synthetic_summaries_snapshot: dict[str, Any],  # Dependency to prevent concurrent commits
 ) -> dict[str, Any]:
     """Persist synthetic embeddings to LakeFS for debugging and recovery.
 
     Stores the embedding vectors alongside their references.
+
+    Depends on synthetic_summaries_snapshot to ensure sequential LakeFS commits
+    (prevents "predicate failed" errors from concurrent commits).
 
     Args:
         context: Dagster execution context for logging.
         config: Pipeline configuration (is_trial for path selection).
         synthetic_embeddings: Tuple of (DataFrame, embeddings list).
         lakefs: LakeFS resource for data versioning.
+        synthetic_summaries_snapshot: Previous snapshot (unused, forces sequential execution).
 
     Returns:
         Dictionary with storage metadata.
     """
+    del synthetic_summaries_snapshot  # Unused, exists only to enforce dependency
     from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
 
     df, embeddings = synthetic_embeddings

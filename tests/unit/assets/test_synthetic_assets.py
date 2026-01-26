@@ -778,11 +778,14 @@ class TestSyntheticSummariesSnapshot:
         mock_lakefs_with_client: MagicMock,
     ) -> None:
         """Test synthetic_summaries_snapshot stores snapshot in LakeFS."""
+        # Mock synthetic_validation_report dependency (just needs to be a dict)
+        mock_validation_report: dict[str, object] = {"path": "test", "commit_id": "abc123"}
         result = synthetic_summaries_snapshot(
             asset_context,
             pipeline_config,
             sample_synthetic_tuple,
             mock_lakefs_with_client,
+            mock_validation_report,
         )
 
         mock_client = mock_lakefs_with_client.get_client.return_value
@@ -831,11 +834,14 @@ class TestSyntheticEmbeddingsSnapshot:
         mock_lakefs_with_client: MagicMock,
     ) -> None:
         """Test synthetic_embeddings_snapshot stores snapshot in LakeFS."""
+        # Mock synthetic_summaries_snapshot dependency (just needs to be a dict)
+        mock_summaries_snapshot: dict[str, object] = {"path": "test", "commit_id": "abc123"}
         result = synthetic_embeddings_snapshot(
             asset_context,
             pipeline_config,
             sample_embeddings_tuple,
             mock_lakefs_with_client,
+            mock_summaries_snapshot,
         )
 
         mock_client = mock_lakefs_with_client.get_client.return_value

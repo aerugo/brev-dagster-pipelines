@@ -131,6 +131,7 @@ class NIMResource(ConfigurableResource):  # type: ignore[type-arg]
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": max_tokens,
                     "temperature": temperature,
+                    "include_reasoning": False,  # Suppress reasoning tokens in output
                 },
                 timeout=effective_timeout,
             )
@@ -282,7 +283,7 @@ Return ONLY valid JSON, no other text."""
     def generate_classification(
         self,
         speech_text: str,
-        max_tokens: int = 200,
+        max_tokens: int = 500,  # Increased from 200 to handle pretty-printed JSON
         temperature: float = 0.1,
     ) -> dict[str, int]:
         """Generate speech classification using GPT-OSS.

@@ -302,8 +302,13 @@ def retry_with_backoff(
             last_error = e
             last_error_type = type(e).__name__
 
+        except (ValueError, ValidationError) as e:
+            # Validation errors are retryable - LLM might give valid response on retry
+            last_error = e
+            last_error_type = "ValidationError"
+
         except Exception as e:
-            # Non-retryable error - break immediately
+            # Other unexpected errors - break immediately
             last_error = e
             last_error_type = "unexpected_error"
             break

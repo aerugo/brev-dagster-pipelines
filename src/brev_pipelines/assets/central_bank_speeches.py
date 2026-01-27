@@ -536,40 +536,62 @@ def speech_classification(
         - include_reasoning: false parameter
         - Harmony token cleanup
         - Pydantic validation
+
+        This function is designed to NEVER raise exceptions - all errors are
+        caught and recorded in the result dict with fallback values used.
         """
-        reference = str(row["reference"])
+        reference = str(row.get("reference", "unknown"))
         text_excerpt = (row.get("text", "") or "")[:4000]
 
-        # Execute with retry wrapper using new generate_classification method
-        # This handles Harmony tokens, json_object format, and validation
-        result = retry_classification(
-            nim_resource=nim_reasoning,
-            speech_text=text_excerpt,
-            record_id=reference,
-            config=retry_config,
-        )
-
-        # Get values (either parsed or fallback)
-        values = result.parsed_data if result.status == "success" else result.fallback_values
-        if values is None:
-            values = SpeechClassification(
+        def get_fallback() -> SpeechClassification:
+            """Return neutral fallback classification."""
+            return SpeechClassification(
                 monetary_stance=3,
                 trade_stance=3,
                 tariff_mention=0,
                 economic_outlook=3,
             )
 
-        return {
-            "reference": reference,
-            "monetary_stance": values["monetary_stance"],
-            "trade_stance": values["trade_stance"],
-            "tariff_mention": values["tariff_mention"],
-            "economic_outlook": values["economic_outlook"],
-            "_llm_status": result.status,
-            "_llm_error": result.error_message,
-            "_llm_attempts": result.attempts,
-            "_llm_fallback_used": result.fallback_used,
-        }
+        try:
+            # Execute with retry wrapper using new generate_classification method
+            # This handles Harmony tokens, json_object format, and validation
+            result = retry_classification(
+                nim_resource=nim_reasoning,
+                speech_text=text_excerpt,
+                record_id=reference,
+                config=retry_config,
+            )
+
+            # Get values (either parsed or fallback)
+            values = result.parsed_data if result.status == "success" else result.fallback_values
+            if values is None:
+                values = get_fallback()
+
+            return {
+                "reference": reference,
+                "monetary_stance": values["monetary_stance"],
+                "trade_stance": values["trade_stance"],
+                "tariff_mention": values["tariff_mention"],
+                "economic_outlook": values["economic_outlook"],
+                "_llm_status": result.status,
+                "_llm_error": result.error_message or "",  # Always string, never None
+                "_llm_attempts": result.attempts,
+                "_llm_fallback_used": result.fallback_used,
+            }
+        except Exception as e:
+            # Catch-all: should never happen, but ensures job doesn't crash
+            fallback = get_fallback()
+            return {
+                "reference": reference,
+                "monetary_stance": fallback["monetary_stance"],
+                "trade_stance": fallback["trade_stance"],
+                "tariff_mention": fallback["tariff_mention"],
+                "economic_outlook": fallback["economic_outlook"],
+                "_llm_status": "failed",
+                "_llm_error": f"Unexpected error: {e!s}",
+                "_llm_attempts": 0,
+                "_llm_fallback_used": True,
+            }
 
     # Process with checkpointing (5 parallel workers for faster processing)
     context.log.info(f"Starting classification of {len(df)} speeches with checkpointing")
@@ -758,8 +780,11 @@ def speech_summaries(
 
         Uses structured JSON output with separate reasoning and summary fields
         to ensure clean summaries without any reasoning artifacts.
+
+        This function is designed to NEVER raise exceptions - all errors are
+        caught and recorded in the result dict with fallback values used.
         """
-        reference = str(row["reference"])
+        reference = str(row.get("reference", "unknown"))
         title = row.get("title", "") or "Untitled"
         speaker = row.get("speaker", "") or "Unknown"
         central_bank = row.get("central_bank", "") or "Unknown"
@@ -769,36 +794,47 @@ def speech_summaries(
             """Return fallback summary with basic info."""
             return f"• Topic: {title[:100]}\n• Speaker: {speaker}\n• Bank: {central_bank}"
 
-        # Execute with retry wrapper using structured JSON output
-        # The generate_summary method returns only the summary field from JSON
-        result = retry_with_backoff(
-            fn=lambda: nim_reasoning.generate_summary(
-                title=title,
-                speaker=speaker,
-                central_bank=central_bank,
-                text=text,
-                max_tokens=2000,
-                temperature=0.2,
-            ),
-            validate_fn=validate_summary_response,
-            record_id=reference,
-            fallback_fn=get_fallback,
-            config=retry_config,
-        )
+        try:
+            # Execute with retry wrapper using structured JSON output
+            # The generate_summary method returns only the summary field from JSON
+            result = retry_with_backoff(
+                fn=lambda: nim_reasoning.generate_summary(
+                    title=title,
+                    speaker=speaker,
+                    central_bank=central_bank,
+                    text=text,
+                    max_tokens=2000,
+                    temperature=0.2,
+                ),
+                validate_fn=validate_summary_response,
+                record_id=reference,
+                fallback_fn=get_fallback,
+                config=retry_config,
+            )
 
-        # Get summary (either parsed or fallback)
-        summary = result.parsed_data if result.status == "success" else result.fallback_values
-        if summary is None:
-            summary = get_fallback()
+            # Get summary (either parsed or fallback)
+            summary = result.parsed_data if result.status == "success" else result.fallback_values
+            if summary is None:
+                summary = get_fallback()
 
-        return {
-            "reference": reference,
-            "summary": summary,
-            "_llm_status": result.status,
-            "_llm_error": result.error_message,
-            "_llm_attempts": result.attempts,
-            "_llm_fallback_used": result.fallback_used,
-        }
+            return {
+                "reference": reference,
+                "summary": summary,
+                "_llm_status": result.status,
+                "_llm_error": result.error_message or "",  # Always string, never None
+                "_llm_attempts": result.attempts,
+                "_llm_fallback_used": result.fallback_used,
+            }
+        except Exception as e:
+            # Catch-all: should never happen, but ensures job doesn't crash
+            return {
+                "reference": reference,
+                "summary": get_fallback(),
+                "_llm_status": "failed",
+                "_llm_error": f"Unexpected error: {e!s}",
+                "_llm_attempts": 0,
+                "_llm_fallback_used": True,
+            }
 
     # Process with checkpointing (5 parallel workers for faster processing)
     context.log.info(f"Starting summarization of {len(df)} speeches with checkpointing")

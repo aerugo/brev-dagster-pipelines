@@ -40,8 +40,8 @@ from brev_pipelines.resources.lakefs import (
 )
 from brev_pipelines.resources.llm_retry import (
     RetryConfig,
+    retry_classification,
     retry_with_backoff,
-    validate_classification_response,
     validate_summary_response,
 )
 from brev_pipelines.resources.minio import MinIOResource
@@ -308,9 +308,7 @@ def speech_embeddings(
 
     if use_mock:
         # Mock mode: skip checkpointing, generate all embeddings directly
-        context.log.info(
-            f"Mock mode: generating {len(df)} embeddings without checkpointing"
-        )
+        context.log.info(f"Mock mode: generating {len(df)} embeddings without checkpointing")
 
         # Prepare all texts
         texts: list[str] = []
@@ -533,53 +531,35 @@ def speech_classification(
     )
 
     def classify_speech(row: dict[str, Any]) -> dict[str, Any]:
-        """Classify a single speech with retry logic and dead letter tracking."""
+        """Classify a single speech with retry logic and dead letter tracking.
+
+        Uses GPT-OSS generate_classification method which handles:
+        - json_object response format (avoids vLLM bug #23120)
+        - include_reasoning: false parameter
+        - Harmony token cleanup
+        - Pydantic validation
+        """
         reference = str(row["reference"])
         text_excerpt = (row.get("text", "") or "")[:4000]
-        title = row.get("title", "") or "Untitled"
-        speaker = row.get("speaker", "") or "Unknown"
-        central_bank = row.get("central_bank", "") or "Unknown"
 
-        prompt = f"""You are an expert analyst of central bank communications. Classify the following speech on multiple dimensions.
-
-{CLASSIFICATION_FEW_SHOT_EXAMPLES}
-
-Now classify this speech:
-
-Title: {title}
-Speaker: {speaker}
-Central Bank: {central_bank}
-
-Speech excerpt:
-{text_excerpt}
-
-Respond with ONLY a JSON object in this exact format:
-{{"monetary_stance": "very_dovish|somewhat_dovish|neutral|somewhat_hawkish|very_hawkish", "trade_stance": "very_protectionist|somewhat_protectionist|neutral|somewhat_globalist|very_globalist", "tariff_mention": 0 or 1, "economic_outlook": "very_negative|somewhat_negative|neutral|somewhat_positive|very_positive"}}
-
-Classification:"""
-
-        def get_fallback() -> SpeechClassification:
-            """Return neutral fallback values."""
-            return SpeechClassification(
-                monetary_stance=3,
-                trade_stance=3,
-                tariff_mention=0,
-                economic_outlook=3,
-            )
-
-        # Execute with retry wrapper (no per-call logging - progress tracked at batch level)
-        result = retry_with_backoff(
-            fn=lambda: nim_reasoning.generate(prompt, max_tokens=150, temperature=0.1),
-            validate_fn=validate_classification_response,
+        # Execute with retry wrapper using new generate_classification method
+        # This handles Harmony tokens, json_object format, and validation
+        result = retry_classification(
+            nim_resource=nim_reasoning,
+            speech_text=text_excerpt,
             record_id=reference,
-            fallback_fn=get_fallback,
             config=retry_config,
         )
 
         # Get values (either parsed or fallback)
         values = result.parsed_data if result.status == "success" else result.fallback_values
         if values is None:
-            values = get_fallback()
+            values = SpeechClassification(
+                monetary_stance=3,
+                trade_stance=3,
+                tariff_mention=0,
+                economic_outlook=3,
+            )
 
         return {
             "reference": reference,

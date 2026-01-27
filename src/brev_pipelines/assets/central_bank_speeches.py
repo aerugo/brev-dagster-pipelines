@@ -334,7 +334,7 @@ def speech_embeddings(
         deployment="nim-reasoning",
         namespace="nvidia-ai",
         replicas=0,
-        restore_wait_ready=False,  # Don't wait for nim-reasoning to be ready on restore
+        restore_wait_ready=True,  # Wait for nim-reasoning to be ready before classification
     ):
         context.log.info("nim-reasoning scaled down, starting embedding generation")
 

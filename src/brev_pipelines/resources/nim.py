@@ -1,9 +1,8 @@
 """NVIDIA NIM LLM resource for Dagster."""
 
 import requests
-from pydantic import Field
-
 from dagster import ConfigurableResource
+from pydantic import Field
 
 # =============================================================================
 # Exception Types
@@ -333,11 +332,12 @@ Return ONLY valid JSON, no other text."""
         )
 
         # The raw_json is already extracted, now validate and convert
-        from brev_pipelines.types import (GPT_OSS_MONETARY_SCALE,
-                                          GPT_OSS_OUTLOOK_SCALE,
-                                          GPT_OSS_TRADE_SCALE)
-        from brev_pipelines.utils.harmony import \
-            validate_and_convert_classification
+        from brev_pipelines.types import (
+            GPT_OSS_MONETARY_SCALE,
+            GPT_OSS_OUTLOOK_SCALE,
+            GPT_OSS_TRADE_SCALE,
+        )
+        from brev_pipelines.utils.harmony import validate_and_convert_classification
 
         # Validate and convert
         validated = validate_and_convert_classification(raw_json)
@@ -390,8 +390,9 @@ Return ONLY valid JSON, no other text."""
             >>> print(summary)
             "• Rate hike: +25 bps to 5.25-5.50%..."
         """
-        from brev_pipelines.types import GPT_OSS_SUMMARY_SCHEMA, SpeechSummary
         from pydantic import ValidationError
+
+        from brev_pipelines.types import GPT_OSS_SUMMARY_SCHEMA, SpeechSummary
 
         # Truncate text to avoid context overflow
         text_excerpt = text[:10000]

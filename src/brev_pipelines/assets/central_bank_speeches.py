@@ -26,27 +26,33 @@ import io
 from datetime import UTC, datetime
 from typing import Any, cast
 
+import dagster as dg
 import polars as pl
+
 from brev_pipelines.config import PipelineConfig
-from brev_pipelines.io_managers.checkpoint import (LLMCheckpointManager,
-                                                   process_with_checkpoint)
+from brev_pipelines.io_managers.checkpoint import LLMCheckpointManager, process_with_checkpoint
 from brev_pipelines.resources.k8s_scaler import K8sScalerResource
-from brev_pipelines.resources.lakefs import (LakeFSConnectionError,
-                                             LakeFSError, LakeFSResource)
-from brev_pipelines.resources.llm_retry import (RetryConfig,
-                                                retry_classification,
-                                                retry_with_backoff,
-                                                validate_summary_response)
+from brev_pipelines.resources.lakefs import LakeFSConnectionError, LakeFSError, LakeFSResource
+from brev_pipelines.resources.llm_retry import (
+    RetryConfig,
+    retry_classification,
+    retry_with_backoff,
+    validate_summary_response,
+)
 from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.nim import NIMResource
 from brev_pipelines.resources.nim_embedding import NIMEmbeddingResource
-from brev_pipelines.resources.weaviate import (WeaviateCollectionError,
-                                               WeaviateConnectionError,
-                                               WeaviateResource)
-from brev_pipelines.types import (LLMAssetMetadata, LLMFailureBreakdown,
-                                  SpeechClassification, WeaviatePropertyDef)
-
-import dagster as dg
+from brev_pipelines.resources.weaviate import (
+    WeaviateCollectionError,
+    WeaviateConnectionError,
+    WeaviateResource,
+)
+from brev_pipelines.types import (
+    LLMAssetMetadata,
+    LLMFailureBreakdown,
+    SpeechClassification,
+    WeaviatePropertyDef,
+)
 
 # Collection schema for Weaviate
 SPEECHES_SCHEMA: list[WeaviatePropertyDef] = [

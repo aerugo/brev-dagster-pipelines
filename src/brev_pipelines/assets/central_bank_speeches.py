@@ -571,7 +571,7 @@ def speech_classification(
             "_llm_fallback_used": result.fallback_used,
         }
 
-    # Process with checkpointing
+    # Process with checkpointing (5 parallel workers for faster processing)
     context.log.info(f"Starting classification of {len(df)} speeches with checkpointing")
     results_df = process_with_checkpoint(
         df=df,
@@ -580,6 +580,7 @@ def speech_classification(
         checkpoint_manager=checkpoint_mgr,
         batch_size=10,
         logger=context.log,
+        parallel_workers=5,
     )
 
     # Clean up checkpoint on success
@@ -799,7 +800,7 @@ def speech_summaries(
             "_llm_fallback_used": result.fallback_used,
         }
 
-    # Process with checkpointing
+    # Process with checkpointing (5 parallel workers for faster processing)
     context.log.info(f"Starting summarization of {len(df)} speeches with checkpointing")
     results_df = process_with_checkpoint(
         df=df,
@@ -808,6 +809,7 @@ def speech_summaries(
         checkpoint_manager=checkpoint_mgr,
         batch_size=10,
         logger=context.log,
+        parallel_workers=5,
     )
 
     # Clean up checkpoint on success

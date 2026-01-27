@@ -215,6 +215,7 @@ def process_with_checkpoint(
     batch_size: int = 10,
     logger: DagsterLogManager | None = None,
     progress_log_interval: int = 100,
+    parallel_workers: int = 1,
 ) -> pl.DataFrame | None:
     """Process DataFrame rows with checkpointing for LLM operations.
 
@@ -231,10 +232,13 @@ def process_with_checkpoint(
         batch_size: Number of rows to process before saving checkpoint.
         logger: Optional logger for progress updates.
         progress_log_interval: Log progress every N items (default 100).
+        parallel_workers: Number of parallel workers for processing (default 1 = sequential).
 
     Returns:
         DataFrame with all processing results.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     # Load existing checkpoint
     existing = checkpoint_manager.load()
     processed_ids = set()
@@ -253,7 +257,8 @@ def process_with_checkpoint(
         return existing
 
     if logger:
-        logger.info(f"Processing {total_remaining} rows")
+        parallel_msg = f" (parallel: {parallel_workers} workers)" if parallel_workers > 1 else ""
+        logger.info(f"Processing {total_remaining} rows{parallel_msg}")
 
     # Process in batches with progress and failure tracking
     rows = to_process.to_dicts()
@@ -264,12 +269,9 @@ def process_with_checkpoint(
     last_log_count = 0
     recent_errors: list[str] = []  # Track last few errors for summary
 
-    for row in rows:
-        result = process_fn(row)
-        batch_results.append(result)
-        processed_count += 1
-
-        # Track success/failure based on _llm_status column
+    def track_result(result: dict[str, Any]) -> None:
+        """Track success/failure for a single result."""
+        nonlocal success_count, failure_count
         status = result.get("_llm_status", "success")
         if status == "failed":
             failure_count += 1
@@ -287,20 +289,56 @@ def process_with_checkpoint(
         else:
             success_count += 1
 
-        # Save checkpoint at batch boundaries
-        if len(batch_results) >= batch_size:
-            checkpoint_manager.save_batch(batch_results, force=True)
-            batch_results = []
+    if parallel_workers > 1:
+        # Parallel processing using ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+            # Process in chunks of parallel_workers
+            for i in range(0, len(rows), parallel_workers):
+                chunk = rows[i : i + parallel_workers]
+                futures = {executor.submit(process_fn, row): row for row in chunk}
 
-        # Log progress at intervals (including failure rate)
-        if logger and processed_count - last_log_count >= progress_log_interval:
-            pct = (processed_count / total_remaining) * 100
-            fail_rate = (failure_count / processed_count * 100) if processed_count > 0 else 0
-            logger.info(
-                f"Progress: {processed_count}/{total_remaining} ({pct:.0f}%) - "
-                f"Success: {success_count}, Failed: {failure_count} ({fail_rate:.1f}%)"
-            )
-            last_log_count = processed_count
+                for future in as_completed(futures):
+                    result = future.result()
+                    batch_results.append(result)
+                    processed_count += 1
+                    track_result(result)
+
+                # Save checkpoint at batch boundaries
+                if len(batch_results) >= batch_size:
+                    checkpoint_manager.save_batch(batch_results, force=True)
+                    batch_results = []
+
+                # Log progress at intervals
+                if logger and processed_count - last_log_count >= progress_log_interval:
+                    pct = (processed_count / total_remaining) * 100
+                    fail_rate = (failure_count / processed_count * 100) if processed_count > 0 else 0
+                    logger.info(
+                        f"Progress: {processed_count}/{total_remaining} ({pct:.0f}%) - "
+                        f"Success: {success_count}, Failed: {failure_count} ({fail_rate:.1f}%)"
+                    )
+                    last_log_count = processed_count
+    else:
+        # Sequential processing (original behavior)
+        for row in rows:
+            result = process_fn(row)
+            batch_results.append(result)
+            processed_count += 1
+            track_result(result)
+
+            # Save checkpoint at batch boundaries
+            if len(batch_results) >= batch_size:
+                checkpoint_manager.save_batch(batch_results, force=True)
+                batch_results = []
+
+            # Log progress at intervals (including failure rate)
+            if logger and processed_count - last_log_count >= progress_log_interval:
+                pct = (processed_count / total_remaining) * 100
+                fail_rate = (failure_count / processed_count * 100) if processed_count > 0 else 0
+                logger.info(
+                    f"Progress: {processed_count}/{total_remaining} ({pct:.0f}%) - "
+                    f"Success: {success_count}, Failed: {failure_count} ({fail_rate:.1f}%)"
+                )
+                last_log_count = processed_count
 
     # Save any remaining results
     if batch_results:

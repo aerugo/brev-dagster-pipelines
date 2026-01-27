@@ -5,7 +5,7 @@ This pipeline demonstrates end-to-end AI data product development:
 2. Version data in LakeFS
 3. Generate embeddings via local NIM embedding model
 4. Multi-dimensional classification via GPT-OSS (monetary, trade, outlook, tariffs)
-5. Generate compact summaries via GPT-OSS (for synthetic data training)
+5. Generate summaries via GPT-OSS
 6. Store enriched data product in LakeFS
 7. Index text and embeddings in Weaviate for vector search
 
@@ -13,8 +13,7 @@ All AI inference uses local NIM endpoints - no external API dependencies.
 
 Data enrichment for synthetic data pipeline:
 - Numeric classifications (1-5 scales): Capture overall sentiment/stance
-- Compact summaries (~1000 chars): Capture specific metrics, regions, sectors,
-  timelines, risks, and policy tools not in numeric classifications
+- Bullet-point summaries: Key points from each speech
 - Both fit within Safe Synthesizer's context window for faithful reproduction
 
 Trial Run Mode:
@@ -27,37 +26,27 @@ import io
 from datetime import UTC, datetime
 from typing import Any, cast
 
-import dagster as dg
 import polars as pl
-
 from brev_pipelines.config import PipelineConfig
-from brev_pipelines.io_managers.checkpoint import LLMCheckpointManager, process_with_checkpoint
+from brev_pipelines.io_managers.checkpoint import (LLMCheckpointManager,
+                                                   process_with_checkpoint)
 from brev_pipelines.resources.k8s_scaler import K8sScalerResource
-from brev_pipelines.resources.lakefs import (
-    LakeFSConnectionError,
-    LakeFSError,
-    LakeFSResource,
-)
-from brev_pipelines.resources.llm_retry import (
-    RetryConfig,
-    retry_classification,
-    retry_with_backoff,
-    validate_summary_response,
-)
+from brev_pipelines.resources.lakefs import (LakeFSConnectionError,
+                                             LakeFSError, LakeFSResource)
+from brev_pipelines.resources.llm_retry import (RetryConfig,
+                                                retry_classification,
+                                                retry_with_backoff,
+                                                validate_summary_response)
 from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.nim import NIMResource
 from brev_pipelines.resources.nim_embedding import NIMEmbeddingResource
-from brev_pipelines.resources.weaviate import (
-    WeaviateCollectionError,
-    WeaviateConnectionError,
-    WeaviateResource,
-)
-from brev_pipelines.types import (
-    LLMAssetMetadata,
-    LLMFailureBreakdown,
-    SpeechClassification,
-    WeaviatePropertyDef,
-)
+from brev_pipelines.resources.weaviate import (WeaviateCollectionError,
+                                               WeaviateConnectionError,
+                                               WeaviateResource)
+from brev_pipelines.types import (LLMAssetMetadata, LLMFailureBreakdown,
+                                  SpeechClassification, WeaviatePropertyDef)
+
+import dagster as dg
 
 # Collection schema for Weaviate
 SPEECHES_SCHEMA: list[WeaviatePropertyDef] = [
@@ -722,31 +711,14 @@ def speech_summaries(
     nim_reasoning: NIMResource,
     minio: MinIOResource,
 ) -> pl.DataFrame:
-    """Generate compact, structured summaries for Safe Synthesizer training.
+    """Generate bullet-point summaries of central bank speeches.
 
-    These summaries are designed to:
-    1. Fit within Safe Synthesizer's context window (~2000 chars target)
-    2. Capture semantic nuance NOT in numeric classifications
-    3. Use bullet-point format for easier TinyLlama reproduction
+    Generates a simple summary of each speech capturing the key points
+    in bullet-point format. The LLM is given freedom to determine what
+    aspects of the speech are most important to highlight.
 
     Uses checkpointing to save progress every 10 rows, allowing recovery
     from failures without reprocessing completed summaries.
-
-    What numeric classifications capture:
-    - monetary_stance (1-5): Overall hawkish/dovish direction
-    - trade_stance (1-5): Protectionist vs globalist leaning
-    - economic_outlook (1-5): Positive/negative sentiment
-    - tariff_mention (0/1): Whether tariffs are discussed
-
-    What summaries capture (the nuance):
-    - SPECIFIC METRICS: Exact numbers cited (inflation %, GDP growth, unemployment)
-    - GEOGRAPHIC FOCUS: Which regions/countries mentioned
-    - SECTOR COMMENTARY: Which industries discussed (housing, energy, finance)
-    - FORWARD GUIDANCE: Timeline language (next quarter, 2024, medium-term)
-    - RISK FACTORS: Specific risks mentioned (supply chain, geopolitical, banking)
-    - POLICY TOOLS: Which instruments mentioned (rates, QE, reserves, guidance)
-
-    Target length: 800-1200 chars (fits in Safe Synthesizer with other metadata)
 
     Args:
         context: Dagster execution context for logging.

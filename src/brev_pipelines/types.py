@@ -825,8 +825,8 @@ GPT_OSS_CLASSIFICATION_SCHEMA: str = """Output JSON with these exact fields:
 # Schema description for GPT-OSS summary prompts
 # Used in system prompt when calling GPT-OSS for summarization
 GPT_OSS_SUMMARY_SCHEMA: str = """Output JSON with these exact fields:
-- reasoning: your step-by-step analysis of what key details to extract (can be any length)
-- summary: compact bullet-point summary under 1000 characters with specific metrics, regions, sectors, timeline, risks, and policy tools"""
+- reasoning: your analysis of the speech content (can be any length)
+- summary: bullet-point summary of the key points from the speech"""
 
 
 class SpeechSummary(BaseModel):
@@ -840,11 +840,11 @@ class SpeechSummary(BaseModel):
 
     reasoning: str = Field(
         ...,
-        description="Step-by-step analysis of key details to extract",
+        description="Analysis of the speech content",
     )
     summary: str = Field(
         ...,
-        description="Compact bullet-point summary under 1000 characters",
+        description="Bullet-point summary of the key points",
         min_length=50,
-        max_length=1500,
+        max_length=2000,
     )

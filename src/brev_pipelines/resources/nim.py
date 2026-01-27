@@ -1,8 +1,9 @@
 """NVIDIA NIM LLM resource for Dagster."""
 
 import requests
-from dagster import ConfigurableResource
 from pydantic import Field
+
+from dagster import ConfigurableResource
 
 # =============================================================================
 # Exception Types
@@ -332,12 +333,11 @@ Return ONLY valid JSON, no other text."""
         )
 
         # The raw_json is already extracted, now validate and convert
-        from brev_pipelines.types import (
-            GPT_OSS_MONETARY_SCALE,
-            GPT_OSS_OUTLOOK_SCALE,
-            GPT_OSS_TRADE_SCALE,
-        )
-        from brev_pipelines.utils.harmony import validate_and_convert_classification
+        from brev_pipelines.types import (GPT_OSS_MONETARY_SCALE,
+                                          GPT_OSS_OUTLOOK_SCALE,
+                                          GPT_OSS_TRADE_SCALE)
+        from brev_pipelines.utils.harmony import \
+            validate_and_convert_classification
 
         # Validate and convert
         validated = validate_and_convert_classification(raw_json)
@@ -390,22 +390,13 @@ Return ONLY valid JSON, no other text."""
             >>> print(summary)
             "• Rate hike: +25 bps to 5.25-5.50%..."
         """
-        from pydantic import ValidationError
-
         from brev_pipelines.types import GPT_OSS_SUMMARY_SCHEMA, SpeechSummary
+        from pydantic import ValidationError
 
         # Truncate text to avoid context overflow
         text_excerpt = text[:10000]
 
-        prompt = f"""Extract key details from this central bank speech into a COMPACT bullet-point summary.
-
-Focus on SPECIFIC DETAILS not captured by general sentiment scores:
-• METRICS: Exact numbers (inflation %, GDP growth, unemployment rate, rate changes)
-• REGIONS: Countries/regions specifically discussed
-• SECTORS: Industries mentioned (housing, energy, labor, banking, trade)
-• TIMELINE: Forward guidance timeframes (next meeting, Q2 2024, medium-term)
-• RISKS: Specific concerns (supply chain, geopolitical, financial stability)
-• TOOLS: Policy instruments discussed (rates, QE, reserves, forward guidance)
+        prompt = f"""Summarize this central bank speech in a few bullet points.
 
 Speech: {title}
 Speaker: {speaker} ({central_bank})
@@ -413,7 +404,7 @@ Speaker: {speaker} ({central_bank})
 Text excerpt:
 {text_excerpt}
 
-Provide your reasoning first, then a compact bullet-point summary (under 1000 characters)."""
+Provide your reasoning first, then a bullet-point summary of the key points."""
 
         system_prompt = "You are a central bank speech summarizer. Analyze the speech and extract key economic details into a compact summary."
 

@@ -60,6 +60,8 @@ from brev_pipelines.types import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from brev_pipelines.resources.nim import NIMResource
+
 T = TypeVar("T")
 
 
@@ -410,3 +412,127 @@ def validate_summary_response(response: str) -> str:
         return stripped[:1500] + "..."
 
     return stripped
+
+
+# =============================================================================
+# GPT-OSS Classification with Retry (INV-N010, INV-N011)
+# =============================================================================
+
+
+def retry_classification(
+    nim_resource: NIMResource,
+    speech_text: str,
+    record_id: str,
+    config: RetryConfig | None = None,
+) -> LLMCallResult[SpeechClassification]:
+    """Execute speech classification with retry logic using generate_classification.
+
+    Uses the new generate_classification method which handles:
+    - json_object response format (avoids vLLM bug #23120)
+    - include_reasoning: false parameter
+    - Harmony token cleanup
+    - Pydantic validation
+
+    Args:
+        nim_resource: NIM resource configured for GPT-OSS.
+        speech_text: Text of the speech to classify.
+        record_id: Identifier for the record being processed.
+        config: Retry configuration (defaults to RetryConfig()).
+
+    Returns:
+        LLMCallResult with SpeechClassification data or fallback values.
+    """
+    from pydantic import ValidationError as PydanticValidationError
+
+    if config is None:
+        config = RetryConfig()
+
+    start_time = time.time()
+    last_error: Exception | None = None
+    last_error_type: str | None = None
+
+    for attempt in range(config.max_retries):
+        try:
+            # Call generate_classification which handles Harmony tokens and validation
+            result_dict = nim_resource.generate_classification(speech_text=speech_text)
+
+            # Convert to SpeechClassification TypedDict
+            parsed_data = SpeechClassification(
+                monetary_stance=result_dict["monetary_stance"],
+                trade_stance=result_dict["trade_stance"],
+                tariff_mention=result_dict["tariff_mention"],
+                economic_outlook=result_dict["economic_outlook"],
+            )
+
+            # Success!
+            duration_ms = int((time.time() - start_time) * 1000)
+            return LLMCallResult(
+                record_id=record_id,
+                status="success",
+                parsed_data=parsed_data,
+                attempts=attempt + 1,
+                duration_ms=duration_ms,
+            )
+
+        except NIMServiceUnavailableError as e:
+            # Service unavailable - skip retries, use fallback immediately
+            last_error = e
+            last_error_type = "NIMServiceUnavailableError"
+            break
+
+        except NIMTimeoutException as e:
+            last_error = LLMTimeoutError(str(e))
+            last_error_type = "LLMTimeoutError"
+
+        except NIMRateLimitException as e:
+            last_error = LLMRateLimitError(str(e))
+            last_error_type = "LLMRateLimitError"
+
+        except NIMServerException as e:
+            last_error = LLMServerError(str(e))
+            last_error_type = "LLMServerError"
+
+        except NIMError as e:
+            last_error = RetryableError(str(e))
+            last_error_type = "RetryableError"
+
+        except PydanticValidationError as e:
+            # Validation error from generate_classification - retryable
+            last_error = ValidationError(str(e))
+            last_error_type = "ValidationError"
+
+        except ValueError as e:
+            # JSON extraction failed - retryable
+            last_error = ValidationError(str(e))
+            last_error_type = "ValidationError"
+
+        except Exception as e:
+            # Non-retryable error - break immediately
+            last_error = e
+            last_error_type = "unexpected_error"
+            break
+
+        # Wait before retry
+        if attempt < config.max_retries - 1:
+            delay = calculate_backoff(attempt, config)
+            time.sleep(delay)
+
+    # All retries exhausted or early exit - use fallback
+    duration_ms = int((time.time() - start_time) * 1000)
+    fallback_values = SpeechClassification(
+        monetary_stance=3,
+        trade_stance=3,
+        tariff_mention=0,
+        economic_outlook=3,
+    )
+
+    return LLMCallResult(
+        record_id=record_id,
+        status="failed",
+        error_type=last_error_type,
+        error_message=str(last_error) if last_error else None,
+        attempts=attempt + 1,
+        fallback_used=True,
+        fallback_values=fallback_values,
+        duration_ms=duration_ms,
+    )

@@ -14,7 +14,12 @@ All types follow:
 
 from __future__ import annotations
 
-from typing import Protocol, TypedDict, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, runtime_checkable
+
+from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:
+    pass
 
 # =============================================================================
 # Weaviate Types
@@ -680,3 +685,141 @@ EmbeddingBatch = list[EmbeddingVector]
 
 # For Weaviate objects
 WeaviateObjectList = list[WeaviateObject]
+
+
+# =============================================================================
+# GPT-OSS Structured Output Types
+# =============================================================================
+
+
+class NIMResponseFormat(TypedDict, total=False):
+    """Response format configuration for NIM GPT-OSS calls.
+
+    Use json_object (NOT json_schema) for GPT-OSS due to vLLM bug #23120.
+    See: docs/reports/gpt-oss-reasoning-structured-output.md
+
+    Attributes:
+        type: Format type - 'text', 'json_object', or 'json_schema'.
+        json_schema: Schema definition (only for json_schema type - NOT recommended).
+    """
+
+    type: Literal["text", "json_object", "json_schema"]
+    json_schema: dict[str, object] | None
+
+
+# Type aliases for GPT-OSS classification values
+MonetaryStanceValue = Literal[
+    "very_dovish", "dovish", "neutral", "hawkish", "very_hawkish"
+]
+TradeStanceValue = Literal[
+    "very_protectionist", "protectionist", "neutral", "globalist", "very_globalist"
+]
+EconomicOutlookValue = Literal[
+    "very_negative", "negative", "neutral", "positive", "very_positive"
+]
+
+
+class GPTOSSClassificationResult(BaseModel):
+    """Pydantic model for GPT-OSS classification response validation.
+
+    Used to validate JSON output from GPT-OSS LLM calls. Ensures all
+    classification values are within the allowed enums.
+
+    This model is frozen (immutable) and strict (no type coercion).
+
+    Attributes:
+        monetary_stance: Monetary policy stance (1=very_dovish to 5=very_hawkish).
+        trade_stance: Trade policy stance (1=very_protectionist to 5=very_globalist).
+        tariff_mention: Whether tariffs are mentioned (0 or 1).
+        economic_outlook: Economic outlook (1=very_negative to 5=very_positive).
+
+    Example:
+        >>> result = GPTOSSClassificationResult(
+        ...     monetary_stance="hawkish",
+        ...     trade_stance="neutral",
+        ...     tariff_mention=0,
+        ...     economic_outlook="positive",
+        ... )
+        >>> result.monetary_stance
+        'hawkish'
+    """
+
+    model_config = ConfigDict(strict=True, frozen=True)
+
+    monetary_stance: MonetaryStanceValue = Field(
+        description="Monetary policy stance expressed in the speech"
+    )
+    trade_stance: TradeStanceValue = Field(
+        description="Trade policy stance expressed in the speech"
+    )
+    tariff_mention: Literal[0, 1] = Field(
+        description="Whether tariffs are mentioned (1) or not (0)"
+    )
+    economic_outlook: EconomicOutlookValue = Field(
+        description="Economic outlook expressed in the speech"
+    )
+
+
+# Scale mappings for GPT-OSS classification values
+GPT_OSS_MONETARY_SCALE: dict[str, int] = {
+    "very_dovish": 1,
+    "dovish": 2,
+    "neutral": 3,
+    "hawkish": 4,
+    "very_hawkish": 5,
+}
+
+GPT_OSS_TRADE_SCALE: dict[str, int] = {
+    "very_protectionist": 1,
+    "protectionist": 2,
+    "neutral": 3,
+    "globalist": 4,
+    "very_globalist": 5,
+}
+
+GPT_OSS_OUTLOOK_SCALE: dict[str, int] = {
+    "very_negative": 1,
+    "negative": 2,
+    "neutral": 3,
+    "positive": 4,
+    "very_positive": 5,
+}
+
+
+def gpt_oss_classification_to_numeric(
+    result: GPTOSSClassificationResult,
+) -> SpeechClassification:
+    """Convert GPT-OSS classification result to numeric values.
+
+    Maps string stance values to 1-5 numeric scale for storage.
+
+    Args:
+        result: Validated GPT-OSS classification result.
+
+    Returns:
+        SpeechClassification TypedDict with numeric values.
+
+    Example:
+        >>> result = GPTOSSClassificationResult(
+        ...     monetary_stance="hawkish", trade_stance="neutral",
+        ...     tariff_mention=0, economic_outlook="positive"
+        ... )
+        >>> numeric = gpt_oss_classification_to_numeric(result)
+        >>> numeric["monetary_stance"]
+        4
+    """
+    return SpeechClassification(
+        monetary_stance=GPT_OSS_MONETARY_SCALE[result.monetary_stance],
+        trade_stance=GPT_OSS_TRADE_SCALE[result.trade_stance],
+        tariff_mention=result.tariff_mention,
+        economic_outlook=GPT_OSS_OUTLOOK_SCALE[result.economic_outlook],
+    )
+
+
+# Schema description for GPT-OSS classification prompts
+# Used in system prompt when calling GPT-OSS for classification
+GPT_OSS_CLASSIFICATION_SCHEMA: str = """Output JSON with these exact fields:
+- monetary_stance: one of ["very_dovish", "dovish", "neutral", "hawkish", "very_hawkish"]
+- trade_stance: one of ["very_protectionist", "protectionist", "neutral", "globalist", "very_globalist"]
+- tariff_mention: 0 if no tariffs mentioned, 1 if tariffs mentioned
+- economic_outlook: one of ["very_negative", "negative", "neutral", "positive", "very_positive"]"""

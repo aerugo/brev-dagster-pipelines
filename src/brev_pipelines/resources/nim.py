@@ -196,3 +196,151 @@ class NIMResource(ConfigurableResource):  # type: ignore[type-arg]
             return response.status_code == 200
         except Exception:
             return False
+
+    # =========================================================================
+    # GPT-OSS Structured Output Methods
+    # =========================================================================
+
+    def generate_json(
+        self,
+        prompt: str,
+        system_prompt: str,
+        schema_description: str,
+        max_tokens: int = 500,
+        temperature: float = 0.1,
+    ) -> dict[str, object]:
+        """Generate structured JSON output from GPT-OSS.
+
+        Uses json_object mode (NOT json_schema) to avoid vLLM bug #23120.
+        Includes reasoning suppression and Harmony token cleanup.
+
+        Per INV-N010 and INV-N011:
+        - Uses json_object response format (not json_schema)
+        - Includes include_reasoning: false
+
+        Args:
+            prompt: User prompt with content to analyze.
+            system_prompt: Base system instructions.
+            schema_description: Description of expected JSON schema.
+            max_tokens: Maximum tokens to generate.
+            temperature: Sampling temperature (lower = more deterministic).
+
+        Returns:
+            Parsed JSON dictionary.
+
+        Raises:
+            ValueError: If response cannot be parsed as JSON.
+            requests.HTTPError: If NIM API returns an error.
+
+        Example:
+            >>> result = nim.generate_json(
+            ...     prompt="Classify: The Fed raised rates",
+            ...     system_prompt="You are a classifier",
+            ...     schema_description="Return JSON with monetary_stance field",
+            ... )
+            >>> print(result)
+            {"monetary_stance": "hawkish", ...}
+        """
+        from brev_pipelines.utils.harmony import extract_json_from_harmony
+
+        # Build system prompt with reasoning level and schema
+        full_system_prompt = f"""Reasoning: low
+{system_prompt}
+
+{schema_description}
+
+Return ONLY valid JSON, no other text."""
+
+        # Build request payload - use json_object, NOT json_schema
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": full_system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "response_format": {"type": "json_object"},
+            "include_reasoning": False,
+        }
+
+        # Make API call
+        response = requests.post(
+            f"{self.endpoint}/v1/chat/completions",
+            json=payload,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+
+        # Extract content from response
+        result = response.json()
+        content: str = result["choices"][0]["message"]["content"]
+
+        # Parse JSON, handling any residual Harmony tokens
+        return extract_json_from_harmony(content)
+
+    def generate_classification(
+        self,
+        speech_text: str,
+        max_tokens: int = 200,
+        temperature: float = 0.1,
+    ) -> dict[str, int]:
+        """Generate speech classification using GPT-OSS.
+
+        Specialized method for central bank speech classification.
+        Returns numeric values (1-5 scale) for each classification dimension.
+
+        Args:
+            speech_text: Text of the speech to classify.
+            max_tokens: Maximum tokens to generate.
+            temperature: Sampling temperature.
+
+        Returns:
+            SpeechClassification TypedDict with numeric values:
+            - monetary_stance: 1 (very_dovish) to 5 (very_hawkish)
+            - trade_stance: 1 (very_protectionist) to 5 (very_globalist)
+            - tariff_mention: 0 or 1
+            - economic_outlook: 1 (very_negative) to 5 (very_positive)
+
+        Raises:
+            ValueError: If JSON cannot be extracted.
+            ValidationError: If response doesn't match classification schema.
+
+        Example:
+            >>> result = nim.generate_classification("The Fed raised rates...")
+            >>> result["monetary_stance"]
+            4
+        """
+        from brev_pipelines.types import GPT_OSS_CLASSIFICATION_SCHEMA
+        from brev_pipelines.utils.harmony import parse_classification_response
+
+        # Truncate speech to avoid context overflow
+        truncated_text = speech_text[:8000]
+
+        # Make the API call
+        raw_json = self.generate_json(
+            prompt=f"Analyze this central bank speech:\n\n{truncated_text}",
+            system_prompt="You are a central bank speech classifier. Analyze the speech and classify it along multiple dimensions.",
+            schema_description=GPT_OSS_CLASSIFICATION_SCHEMA,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+
+        # The raw_json is already extracted, now validate and convert
+        from brev_pipelines.utils.harmony import validate_and_convert_classification
+        from brev_pipelines.types import (
+            GPT_OSS_MONETARY_SCALE,
+            GPT_OSS_TRADE_SCALE,
+            GPT_OSS_OUTLOOK_SCALE,
+        )
+
+        # Validate and convert
+        validated = validate_and_convert_classification(raw_json)
+
+        # Return numeric values
+        return {
+            "monetary_stance": GPT_OSS_MONETARY_SCALE[validated.monetary_stance],
+            "trade_stance": GPT_OSS_TRADE_SCALE[validated.trade_stance],
+            "tariff_mention": validated.tariff_mention,
+            "economic_outlook": GPT_OSS_OUTLOOK_SCALE[validated.economic_outlook],
+        }

@@ -312,7 +312,6 @@ Return ONLY valid JSON, no other text."""
             4
         """
         from brev_pipelines.types import GPT_OSS_CLASSIFICATION_SCHEMA
-        from brev_pipelines.utils.harmony import parse_classification_response
 
         # Truncate speech to avoid context overflow
         truncated_text = speech_text[:8000]
@@ -327,12 +326,12 @@ Return ONLY valid JSON, no other text."""
         )
 
         # The raw_json is already extracted, now validate and convert
-        from brev_pipelines.utils.harmony import validate_and_convert_classification
         from brev_pipelines.types import (
             GPT_OSS_MONETARY_SCALE,
-            GPT_OSS_TRADE_SCALE,
             GPT_OSS_OUTLOOK_SCALE,
+            GPT_OSS_TRADE_SCALE,
         )
+        from brev_pipelines.utils.harmony import validate_and_convert_classification
 
         # Validate and convert
         validated = validate_and_convert_classification(raw_json)

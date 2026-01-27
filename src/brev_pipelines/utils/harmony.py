@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import re
-from typing import TYPE_CHECKING
 
 from brev_pipelines.types import (
     GPT_OSS_MONETARY_SCALE,
@@ -28,9 +27,6 @@ from brev_pipelines.types import (
     GPTOSSClassificationResult,
     SpeechClassification,
 )
-
-if TYPE_CHECKING:
-    pass
 
 # =============================================================================
 # Harmony Token Constants
@@ -86,7 +82,7 @@ def remove_harmony_tokens(content: str) -> str:
 
 
 def extract_json_from_harmony(content: str) -> dict[str, object]:
-    """Extract and parse JSON from Harmony-formatted content.
+    r"""Extract and parse JSON from Harmony-formatted content.
 
     Handles:
     - Harmony control tokens (<|return|>, <|channel|>, etc.)

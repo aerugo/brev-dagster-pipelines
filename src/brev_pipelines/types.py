@@ -14,12 +14,9 @@ All types follow:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, runtime_checkable
+from typing import Literal, Protocol, TypedDict, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
-
-if TYPE_CHECKING:
-    pass
 
 # =============================================================================
 # Weaviate Types

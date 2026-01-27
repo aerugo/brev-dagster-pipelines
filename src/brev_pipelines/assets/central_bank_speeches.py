@@ -272,6 +272,9 @@ def cleaned_speeches(
         "layer": "enriched",
         "uses_nim_embedding": "true",
     },
+    # Run after classification and summaries complete - embeddings scales down
+    # nim-reasoning to free GPU memory, which would break concurrent LLM calls
+    deps=[dg.AssetDep("speech_classification"), dg.AssetDep("speech_summaries")],
 )
 def speech_embeddings(
     context: dg.AssetExecutionContext,

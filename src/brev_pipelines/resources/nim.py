@@ -92,7 +92,7 @@ class NIMResource(ConfigurableResource):  # type: ignore[type-arg]
     def generate(
         self,
         prompt: str,
-        max_tokens: int = 100,
+        max_tokens: int = 2000,  # High default to avoid truncation
         temperature: float = 0.7,
         timeout_override: int | None = None,
     ) -> str:
@@ -167,7 +167,7 @@ class NIMResource(ConfigurableResource):  # type: ignore[type-arg]
     def generate_batch(
         self,
         prompts: list[str],
-        max_tokens: int = 100,
+        max_tokens: int = 2000,  # High default to avoid truncation
         temperature: float = 0.7,
     ) -> list[str]:
         """Generate text for multiple prompts sequentially.
@@ -207,7 +207,7 @@ class NIMResource(ConfigurableResource):  # type: ignore[type-arg]
         prompt: str,
         system_prompt: str,
         schema_description: str,
-        max_tokens: int = 500,
+        max_tokens: int = 2000,  # High default to avoid truncation
         temperature: float = 0.1,
     ) -> dict[str, object]:
         """Generate structured JSON output from GPT-OSS.
@@ -283,7 +283,7 @@ Return ONLY valid JSON, no other text."""
     def generate_classification(
         self,
         speech_text: str,
-        max_tokens: int = 500,  # Increased from 200 to handle pretty-printed JSON
+        max_tokens: int = 2000,  # High token budget to ensure complete JSON output
         temperature: float = 0.1,
     ) -> dict[str, int]:
         """Generate speech classification using GPT-OSS.

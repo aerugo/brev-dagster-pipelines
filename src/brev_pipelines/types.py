@@ -826,7 +826,7 @@ GPT_OSS_CLASSIFICATION_SCHEMA: str = """Output JSON with these exact fields:
 # Used in system prompt when calling GPT-OSS for summarization
 GPT_OSS_SUMMARY_SCHEMA: str = """Output JSON with these exact fields:
 - reasoning: your analysis of the speech content (can be any length)
-- summary: bullet-point summary of the key points from the speech"""
+- summary: a TEXT STRING containing bullet-point summary (use • or - for bullets, NOT a JSON array)"""
 
 
 class SpeechSummary(BaseModel):

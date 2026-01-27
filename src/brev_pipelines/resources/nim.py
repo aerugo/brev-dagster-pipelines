@@ -405,7 +405,8 @@ Speaker: {speaker} ({central_bank})
 Text excerpt:
 {text_excerpt}
 
-Provide your reasoning first, then a bullet-point summary of the key points."""
+Provide your reasoning first, then a bullet-point summary of the key points.
+The summary should be a single text string with bullet points (using • or -), not a JSON array."""
 
         system_prompt = "You are a central bank speech summarizer. Analyze the speech and extract key economic details into a compact summary."
 
@@ -425,7 +426,14 @@ Provide your reasoning first, then a bullet-point summary of the key points."""
         except ValidationError as e:
             # If validation fails, try to extract summary field directly
             if "summary" in raw_json:
-                summary = str(raw_json["summary"]).strip()
+                summary_raw = raw_json["summary"]
+                # Handle case where LLM returns a list of bullet points instead of string
+                if isinstance(summary_raw, list):
+                    # Join list items into a bullet-point string
+                    summary = "\n".join(f"• {item}" if not str(item).startswith("•") else str(item)
+                                       for item in summary_raw if item)
+                else:
+                    summary = str(summary_raw).strip()
                 if len(summary) >= 50:
-                    return summary[:1500] if len(summary) > 1500 else summary
+                    return summary[:2000] if len(summary) > 2000 else summary
             raise ValueError(f"Invalid summary response: {e}") from e

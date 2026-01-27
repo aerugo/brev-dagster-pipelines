@@ -45,6 +45,10 @@ htmlcov/
 dagster_home/
 .tmp_dagster_home*/
 
+# Kubernetes
+kubeconfig.yaml
+kubeconfig*.yaml
+
 # OS
 .DS_Store
 Thumbs.db

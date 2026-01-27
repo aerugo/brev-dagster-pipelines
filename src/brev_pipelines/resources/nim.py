@@ -349,3 +349,91 @@ Return ONLY valid JSON, no other text."""
             "tariff_mention": validated.tariff_mention,
             "economic_outlook": GPT_OSS_OUTLOOK_SCALE[validated.economic_outlook],
         }
+
+    def generate_summary(
+        self,
+        title: str,
+        speaker: str,
+        central_bank: str,
+        text: str,
+        max_tokens: int = 2000,
+        temperature: float = 0.2,
+    ) -> str:
+        """Generate speech summary using GPT-OSS with structured JSON output.
+
+        Uses JSON output format with separate reasoning and summary fields
+        to ensure the summary contains only user-facing content without
+        any reasoning or analysis artifacts.
+
+        Args:
+            title: Title of the speech.
+            speaker: Name of the speaker.
+            central_bank: Name of the central bank.
+            text: Full text of the speech (will be truncated if too long).
+            max_tokens: Maximum tokens to generate.
+            temperature: Sampling temperature.
+
+        Returns:
+            Clean summary string without reasoning content.
+
+        Raises:
+            ValueError: If JSON cannot be extracted.
+            ValidationError: If response doesn't match summary schema.
+
+        Example:
+            >>> summary = nim.generate_summary(
+            ...     title="Monetary Policy Update",
+            ...     speaker="Jerome Powell",
+            ...     central_bank="Federal Reserve",
+            ...     text="Today we decided to raise rates...",
+            ... )
+            >>> print(summary)
+            "• Rate hike: +25 bps to 5.25-5.50%..."
+        """
+        from pydantic import ValidationError
+
+        from brev_pipelines.types import GPT_OSS_SUMMARY_SCHEMA, SpeechSummary
+
+        # Truncate text to avoid context overflow
+        text_excerpt = text[:10000]
+
+        prompt = f"""Extract key details from this central bank speech into a COMPACT bullet-point summary.
+
+Focus on SPECIFIC DETAILS not captured by general sentiment scores:
+• METRICS: Exact numbers (inflation %, GDP growth, unemployment rate, rate changes)
+• REGIONS: Countries/regions specifically discussed
+• SECTORS: Industries mentioned (housing, energy, labor, banking, trade)
+• TIMELINE: Forward guidance timeframes (next meeting, Q2 2024, medium-term)
+• RISKS: Specific concerns (supply chain, geopolitical, financial stability)
+• TOOLS: Policy instruments discussed (rates, QE, reserves, forward guidance)
+
+Speech: {title}
+Speaker: {speaker} ({central_bank})
+
+Text excerpt:
+{text_excerpt}
+
+Provide your reasoning first, then a compact bullet-point summary (under 1000 characters)."""
+
+        system_prompt = "You are a central bank speech summarizer. Analyze the speech and extract key economic details into a compact summary."
+
+        # Make the API call with JSON format
+        raw_json = self.generate_json(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            schema_description=GPT_OSS_SUMMARY_SCHEMA,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+
+        # Validate with Pydantic
+        try:
+            validated = SpeechSummary.model_validate(raw_json)
+            return validated.summary
+        except ValidationError as e:
+            # If validation fails, try to extract summary field directly
+            if "summary" in raw_json:
+                summary = str(raw_json["summary"]).strip()
+                if len(summary) >= 50:
+                    return summary[:1500] if len(summary) > 1500 else summary
+            raise ValueError(f"Invalid summary response: {e}") from e

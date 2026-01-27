@@ -775,42 +775,32 @@ def speech_summaries(
     )
 
     def summarize_speech(row: dict[str, Any]) -> dict[str, Any]:
-        """Generate summary with retry logic and dead letter tracking."""
+        """Generate summary with retry logic and dead letter tracking.
+
+        Uses structured JSON output with separate reasoning and summary fields
+        to ensure clean summaries without any reasoning artifacts.
+        """
         reference = str(row["reference"])
         title = row.get("title", "") or "Untitled"
         speaker = row.get("speaker", "") or "Unknown"
         central_bank = row.get("central_bank", "") or "Unknown"
         text = row.get("text", "") or ""
-        text_excerpt = text[:10000]
-
-        prompt = f"""Extract key details from this central bank speech into a COMPACT bullet-point summary.
-
-IMPORTANT: Keep total output under 1000 characters. Use terse, information-dense bullet points.
-
-Focus on SPECIFIC DETAILS not captured by general sentiment scores:
-
-• METRICS: Exact numbers (inflation %, GDP growth, unemployment rate, rate changes)
-• REGIONS: Countries/regions specifically discussed
-• SECTORS: Industries mentioned (housing, energy, labor, banking, trade)
-• TIMELINE: Forward guidance timeframes (next meeting, Q2 2024, medium-term)
-• RISKS: Specific concerns (supply chain, geopolitical, financial stability)
-• TOOLS: Policy instruments discussed (rates, QE, reserves, forward guidance)
-
-Speech: {title}
-Speaker: {speaker} ({central_bank})
-
-Text excerpt:
-{text_excerpt}
-
-Generate a COMPACT bullet-point summary (under 1000 characters total):"""
 
         def get_fallback() -> str:
             """Return fallback summary with basic info."""
             return f"• Topic: {title[:100]}\n• Speaker: {speaker}\n• Bank: {central_bank}"
 
-        # Execute with retry wrapper (no per-call logging - progress tracked at batch level)
+        # Execute with retry wrapper using structured JSON output
+        # The generate_summary method returns only the summary field from JSON
         result = retry_with_backoff(
-            fn=lambda: nim_reasoning.generate(prompt, max_tokens=400, temperature=0.2),
+            fn=lambda: nim_reasoning.generate_summary(
+                title=title,
+                speaker=speaker,
+                central_bank=central_bank,
+                text=text,
+                max_tokens=2000,
+                temperature=0.2,
+            ),
             validate_fn=validate_summary_response,
             record_id=reference,
             fallback_fn=get_fallback,

@@ -820,3 +820,31 @@ GPT_OSS_CLASSIFICATION_SCHEMA: str = """Output JSON with these exact fields:
 - trade_stance: one of ["very_protectionist", "protectionist", "neutral", "globalist", "very_globalist"]
 - tariff_mention: 0 if no tariffs mentioned, 1 if tariffs mentioned
 - economic_outlook: one of ["very_negative", "negative", "neutral", "positive", "very_positive"]"""
+
+
+# Schema description for GPT-OSS summary prompts
+# Used in system prompt when calling GPT-OSS for summarization
+GPT_OSS_SUMMARY_SCHEMA: str = """Output JSON with these exact fields:
+- reasoning: your step-by-step analysis of what key details to extract (can be any length)
+- summary: compact bullet-point summary under 1000 characters with specific metrics, regions, sectors, timeline, risks, and policy tools"""
+
+
+class SpeechSummary(BaseModel):
+    """Pydantic model for speech summary response from GPT-OSS.
+
+    The model outputs reasoning separately from the summary to ensure
+    the summary field contains only the final user-facing content.
+    """
+
+    model_config = ConfigDict(strict=True)
+
+    reasoning: str = Field(
+        ...,
+        description="Step-by-step analysis of key details to extract",
+    )
+    summary: str = Field(
+        ...,
+        description="Compact bullet-point summary under 1000 characters",
+        min_length=50,
+        max_length=1500,
+    )

@@ -394,8 +394,12 @@ def validate_classification_response(response: str) -> SpeechClassification:
 def validate_summary_response(response: str) -> str:
     """Validate summary LLM response.
 
+    Now expects the response to already be extracted from JSON
+    by the generate_summary method. This function validates
+    the final summary string.
+
     Args:
-        response: Raw LLM response string.
+        response: Summary string (already extracted from JSON).
 
     Returns:
         Validated summary string.

@@ -162,7 +162,12 @@ class NIMResource(ConfigurableResource):  # type: ignore[type-arg]
 
         data = response.json()
         content: str = data["choices"][0]["message"]["content"]
-        return content.strip()
+
+        # Extract only the final channel content from Harmony format
+        # This removes reasoning from the 'analysis' channel
+        from brev_pipelines.utils.harmony import extract_final_channel
+
+        return extract_final_channel(content)
 
     def generate_batch(
         self,

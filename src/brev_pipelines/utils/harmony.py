@@ -76,6 +76,68 @@ def remove_harmony_tokens(content: str) -> str:
     return re.sub(HARMONY_TOKEN_PATTERN, "", content)
 
 
+def extract_final_channel(content: str) -> str:
+    """Extract only the 'final' channel content from Harmony-formatted output.
+
+    GPT-OSS outputs in Harmony format with multiple channels:
+    - analysis: Chain-of-thought reasoning (internal, should not be shown)
+    - commentary: Function preambles and tool calls
+    - final: User-facing response (this is what we want)
+
+    Format example:
+        <|start|>assistant<|channel|>analysis<|message|>{reasoning}<|end|>
+        <|start|>assistant<|channel|>final<|message|>{response}<|return|>
+
+    This function extracts ONLY the content from the 'final' channel,
+    discarding all reasoning from the 'analysis' channel.
+
+    Args:
+        content: Raw Harmony-formatted content from GPT-OSS.
+
+    Returns:
+        Only the final channel content, or the original content
+        (with tokens removed) if no final channel is found.
+
+    Example:
+        >>> extract_final_channel(
+        ...     '<|channel|>analysis<|message|>Let me think...<|end|>'
+        ...     '<|channel|>final<|message|>The answer is 42.<|return|>'
+        ... )
+        'The answer is 42.'
+    """
+    # Pattern to match the final channel content
+    # Looks for: <|channel|>final<|message|>{content}<|end|> or <|return|>
+    final_pattern = r"<\|channel\|>\s*final\s*<\|message\|>(.*?)(?:<\|end\|>|<\|return\|>|$)"
+
+    match = re.search(final_pattern, content, re.DOTALL | re.IGNORECASE)
+    if match:
+        final_content = match.group(1).strip()
+        # Remove any remaining Harmony tokens that might be nested
+        return remove_harmony_tokens(final_content)
+
+    # Alternative pattern: sometimes the format is simpler
+    # <|channel|>final<|message|>{content} (no explicit end token)
+    alt_pattern = r"<\|channel\|>\s*final\s*<\|message\|>(.*?)(?:<\|channel\|>|<\|start\|>|$)"
+    match = re.search(alt_pattern, content, re.DOTALL | re.IGNORECASE)
+    if match:
+        final_content = match.group(1).strip()
+        return remove_harmony_tokens(final_content)
+
+    # If no final channel found, check if content has any Harmony tokens at all
+    if re.search(HARMONY_TOKEN_PATTERN, content):
+        # Has Harmony tokens but no final channel - might be analysis-only output
+        # Try to extract content after the last <|message|> token
+        last_message_pattern = r"<\|message\|>([^<]*?)(?:<\|end\|>|<\|return\|>|$)"
+        matches = list(re.finditer(last_message_pattern, content, re.DOTALL))
+        if matches:
+            # Return the last message content (most likely to be the actual output)
+            final_content = matches[-1].group(1).strip()
+            return remove_harmony_tokens(final_content)
+
+    # No Harmony structure detected - return content with tokens removed
+    return remove_harmony_tokens(content).strip()
+
+
 # =============================================================================
 # JSON Extraction Functions
 # =============================================================================

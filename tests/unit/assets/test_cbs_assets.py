@@ -855,10 +855,8 @@ class TestSpeechEmbeddings:
         return resource
 
     @pytest.fixture
-    def pipeline_config(self) -> "PipelineConfig":
+    def pipeline_config(self) -> PipelineConfig:
         """Create pipeline config for test."""
-        from brev_pipelines.config import PipelineConfig
-
         return PipelineConfig(sample_size=0, is_trial=False)
 
     def test_generates_embeddings_for_all_rows(
@@ -868,7 +866,7 @@ class TestSpeechEmbeddings:
         mock_nim_embedding: MagicMock,
         mock_minio_for_checkpoint: MagicMock,
         mock_lakefs_with_summaries: MagicMock,
-        pipeline_config: "PipelineConfig",
+        pipeline_config: PipelineConfig,
         mock_k8s_scaler: MagicMock,
     ) -> None:
         """Test speech_embeddings generates embeddings for all rows."""

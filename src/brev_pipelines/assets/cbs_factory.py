@@ -18,7 +18,8 @@ Usage:
 """
 
 from datetime import UTC, datetime
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import dagster as dg
 import polars as pl

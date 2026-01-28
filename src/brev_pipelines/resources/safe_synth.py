@@ -691,12 +691,11 @@ size {file_size}
                 # Increase patience to allow more retry attempts
                 "patience": 5,
                 "invalid_fraction_threshold": 0.9,
-                # Enable structured generation to force valid JSON output
-                # Use "json" method instead of "regex" - regex with maxLength is CPU-bound
-                # and causes 0% GPU utilization. JSON method is 3-10x faster.
-                "use_structured_generation": True,
-                "structured_generation_backend": "auto",
-                "structured_generation_schema_method": "json",
+                # Disable structured generation for performance
+                # The regex-based constrained decoding causes 0% GPU utilization
+                # and ~0.1 rec/s. Disabling gives 10-100x speedup with ~30-40%
+                # invalid records that get filtered out during validation.
+                "use_structured_generation": False,
             },
         }
 

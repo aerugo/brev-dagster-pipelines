@@ -269,18 +269,22 @@ def cleaned_speeches(
     },
     # Run after classification and summaries complete - embeddings scales down
     # nim-reasoning to free GPU memory, which would break concurrent LLM calls
-    deps=[dg.AssetDep("speech_classification"), dg.AssetDep("speech_summaries")],
+    deps=[dg.AssetDep("speech_classification")],
 )
 def speech_embeddings(
     context: dg.AssetExecutionContext,
     cleaned_speeches: pl.DataFrame,
+    speech_summaries: pl.DataFrame,
     nim_embedding: NIMEmbeddingResource,
     minio: MinIOResource,
     k8s_scaler: K8sScalerResource,
 ) -> tuple[pl.DataFrame, list[list[float]]]:
     """Generate embeddings for all speeches using local NIM.
 
-    Uses llama-3_2-nemoretriever-300m-embed-v2 model (1024 dimensions).
+    Uses the speech summary for embedding instead of full text to stay within
+    the model's 512 token limit. Summaries are truncated to ~1500 chars to be safe.
+
+    Uses nv-embedqa-e5-v5 model (1024 dimensions).
     Returns tuple of (DataFrame, embeddings) for downstream storage.
 
     In production: Uses checkpointing to save progress every 32 rows,
@@ -292,6 +296,7 @@ def speech_embeddings(
     Args:
         context: Dagster execution context for logging.
         cleaned_speeches: Cleaned DataFrame with speech text.
+        speech_summaries: DataFrame with generated summaries.
         nim_embedding: NIM embedding resource for vector generation.
         minio: MinIO resource for checkpoint storage.
         k8s_scaler: Kubernetes scaler to manage GPU resources.
@@ -299,7 +304,12 @@ def speech_embeddings(
     Returns:
         Tuple of (DataFrame, list of 1024-dim embedding vectors).
     """
-    df = cleaned_speeches  # pl.DataFrame
+    # Join summaries with cleaned speeches
+    df = cleaned_speeches.join(
+        speech_summaries.select(["reference", "summary"]),
+        on="reference",
+        how="left",
+    )
 
     # Check if NIM service is available (determines mock mode)
     use_mock = nim_embedding.use_mock_fallback and not nim_embedding.health_check()
@@ -308,13 +318,15 @@ def speech_embeddings(
         # Mock mode: skip checkpointing, generate all embeddings directly
         context.log.info(f"Mock mode: generating {len(df)} embeddings without checkpointing")
 
-        # Prepare all texts
+        # Prepare all texts using summaries (truncated to fit 512 token limit)
         texts: list[str] = []
         for row in df.iter_rows(named=True):
             title = row.get("title", "") or ""
-            text = row.get("text", "") or ""
-            combined = f"{title}\n\n{text[:2000]}"
-            texts.append(combined)
+            summary = row.get("summary", "") or ""
+            # Use summary if available, fallback to title
+            combined = f"{title}\n\n{summary}" if summary else title or "Untitled speech"
+            # Truncate to ~1500 chars to stay within 512 token limit
+            texts.append(combined[:1500])
 
         # Generate all embeddings in one batch (mock is instant)
         embeddings = nim_embedding.embed_texts(texts, batch_size=32)
@@ -365,17 +377,18 @@ def speech_embeddings(
         for batch_num, i in enumerate(range(0, len(rows), batch_size)):
             batch = rows[i : i + batch_size]
 
-            # Prepare texts for this batch with sanitization
+            # Prepare texts for this batch using summaries (truncated to fit 512 token limit)
             texts = []
             for row in batch:
                 title = row.get("title", "") or ""
-                text = row.get("text", "") or ""
-                # Combine and truncate
-                combined = f"{title}\n\n{text[:2000]}"
-                # Sanitize: remove null bytes, control chars, ensure non-empty
+                summary = row.get("summary", "") or ""
+                # Use summary if available, fallback to title
+                combined = f"{title}\n\n{summary}" if summary else title or "Untitled speech"
+                # Sanitize: remove null bytes, control chars
                 combined = combined.replace("\x00", "").strip()
-                # Replace other problematic control characters
                 combined = "".join(c if c.isprintable() or c in "\n\t" else " " for c in combined)
+                # Truncate to ~1500 chars to stay within 512 token limit
+                combined = combined[:1500]
                 # Ensure non-empty (embedding models reject empty strings)
                 if not combined or len(combined) < 10:
                     combined = f"Speech: {title or 'Untitled'}"
@@ -426,10 +439,13 @@ def speech_embeddings(
             if ref in embedding_map:
                 embeddings.append(embedding_map[ref])
             else:
-                # This shouldn't happen, but fallback to generating
+                # This shouldn't happen, but fallback to generating from summary
                 title = row.get("title", "") or ""
-                text = row.get("text", "") or ""
-                combined = f"{title}\n\n{text[:2000]}"
+                summary = row.get("summary", "") or ""
+                if summary:
+                    combined = f"{title}\n\n{summary}"[:1500]
+                else:
+                    combined = title[:1500] or "Untitled speech"
                 embeddings.append(nim_embedding.embed_text(combined))
 
         context.log.info(f"Generated {len(embeddings)} embeddings, dimension: {len(embeddings[0])}")

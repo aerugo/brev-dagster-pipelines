@@ -197,7 +197,6 @@ class TestSyntheticSummaries:
             }
         )
 
-
     @pytest.fixture
     def mock_k8s_scaler(self) -> MagicMock:
         """Create mock K8s scaler resource."""

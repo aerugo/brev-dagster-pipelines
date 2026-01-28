@@ -106,6 +106,23 @@ class SafeSynthesizerResource(ConfigurableResource):
         description="Use mock synthesis if Safe Synthesizer unavailable (for local dev)",
     )
 
+    def _get_nds_token(self) -> str:
+        """Get NDS token from environment at runtime.
+
+        This reads the token from the NDS_TOKEN environment variable at runtime,
+        rather than at definition time, to handle cases where the secret is
+        mounted after the module is imported.
+        """
+        import os
+
+        token = os.environ.get("NDS_TOKEN", "") or self.nds_token
+        if not token:
+            raise ValueError(
+                "NDS_TOKEN environment variable is not set. "
+                "Ensure the nds-credentials secret is mounted."
+            )
+        return token
+
     def _get_k8s_batch_client(self) -> K8sBatchV1Api:
         """Get Kubernetes batch API client."""
         from kubernetes import client, config
@@ -580,7 +597,7 @@ size {file_size}
         try:
             get_response = requests.get(
                 contents_url,
-                headers={"Authorization": f"token {self.nds_token}"},
+                headers={"Authorization": f"token {self._get_nds_token()}"},
                 timeout=10,
             )
             if get_response.status_code == 200:
@@ -600,7 +617,7 @@ size {file_size}
             "PUT" if existing_sha else "POST",
             contents_url,
             json=commit_payload,
-            headers={"Authorization": f"token {self.nds_token}"},
+            headers={"Authorization": f"token {self._get_nds_token()}"},
             timeout=30,
         )
         commit_response.raise_for_status()

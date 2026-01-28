@@ -365,16 +365,30 @@ def speech_embeddings(
         for batch_num, i in enumerate(range(0, len(rows), batch_size)):
             batch = rows[i : i + batch_size]
 
-            # Prepare texts for this batch
+            # Prepare texts for this batch with sanitization
             texts = []
             for row in batch:
                 title = row.get("title", "") or ""
                 text = row.get("text", "") or ""
+                # Combine and truncate
                 combined = f"{title}\n\n{text[:2000]}"
+                # Sanitize: remove null bytes, control chars, ensure non-empty
+                combined = combined.replace("\x00", "").strip()
+                # Replace other problematic control characters
+                combined = "".join(c if c.isprintable() or c in "\n\t" else " " for c in combined)
+                # Ensure non-empty (embedding models reject empty strings)
+                if not combined or len(combined) < 10:
+                    combined = f"Speech: {title or 'Untitled'}"
                 texts.append(combined)
 
-            # Generate embeddings for batch
-            batch_embeddings = nim_embedding.embed_texts(texts, batch_size=batch_size)
+            # Generate embeddings for batch with error handling
+            try:
+                batch_embeddings = nim_embedding.embed_texts(texts, batch_size=batch_size)
+            except Exception as e:
+                # Log the failing batch for debugging
+                context.log.error(f"Embedding batch {batch_num} failed: {e}")
+                context.log.error(f"First text in batch (truncated): {texts[0][:200]}")
+                raise
 
             # Save to checkpoint
             for j, row in enumerate(batch):

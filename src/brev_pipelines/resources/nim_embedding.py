@@ -167,7 +167,15 @@ class NIMEmbeddingResource(ConfigurableResource):  # type: ignore[type-arg]
                 return [item["embedding"] for item in sorted_data]
 
             except requests.exceptions.RequestException as e:
-                last_error = e
+                # Try to extract detailed error message from response
+                error_detail = str(e)
+                if hasattr(e, "response") and e.response is not None:
+                    try:
+                        error_body = e.response.text[:500]
+                        error_detail = f"{e} - Response: {error_body}"
+                    except Exception:
+                        pass
+                last_error = Exception(error_detail)
                 # If mock fallback enabled and connection failed, use mock immediately
                 if self.use_mock_fallback:
                     self._service_available = False

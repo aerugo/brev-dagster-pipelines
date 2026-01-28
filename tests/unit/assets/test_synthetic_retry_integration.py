@@ -51,11 +51,6 @@ class TestSyntheticSummariesRetry:
         """Create mock Safe Synth resource."""
         return MagicMock()
 
-    @pytest.fixture
-    def mock_k8s_scaler(self) -> MagicMock:
-        """Create mock K8s scaler resource."""
-        return MagicMock()
-
     def _make_successful_response(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Create a successful Safe Synth response."""
         return (
@@ -68,7 +63,6 @@ class TestSyntheticSummariesRetry:
         asset_context: AssetExecutionContext,
         sample_input_df: pl.DataFrame,
         mock_safe_synth: MagicMock,
-        mock_k8s_scaler: MagicMock,
     ) -> None:
         """Should retry when Safe Synth fails with server error."""
         # Fail twice, succeed on third
@@ -86,7 +80,6 @@ class TestSyntheticSummariesRetry:
                 asset_context,
                 sample_input_df,
                 mock_safe_synth,
-                mock_k8s_scaler,
             )
 
         # Should have called synthesize 3 times
@@ -102,7 +95,6 @@ class TestSyntheticSummariesRetry:
         asset_context: AssetExecutionContext,
         sample_input_df: pl.DataFrame,
         mock_safe_synth: MagicMock,
-        mock_k8s_scaler: MagicMock,
     ) -> None:
         """Should return immediately on success without retry."""
         mock_safe_synth.synthesize.return_value = self._make_successful_response()
@@ -111,7 +103,6 @@ class TestSyntheticSummariesRetry:
             asset_context,
             sample_input_df,
             mock_safe_synth,
-            mock_k8s_scaler,
         )
 
         # Should only call synthesize once
@@ -125,7 +116,6 @@ class TestSyntheticSummariesRetry:
         asset_context: AssetExecutionContext,
         sample_input_df: pl.DataFrame,
         mock_safe_synth: MagicMock,
-        mock_k8s_scaler: MagicMock,
     ) -> None:
         """Should raise after all retries exhausted."""
         # Always fail
@@ -136,7 +126,6 @@ class TestSyntheticSummariesRetry:
                 asset_context,
                 sample_input_df,
                 mock_safe_synth,
-                mock_k8s_scaler,
             )
 
         # Should have tried max_retries times (3)
@@ -147,7 +136,6 @@ class TestSyntheticSummariesRetry:
         asset_context: AssetExecutionContext,
         sample_input_df: pl.DataFrame,
         mock_safe_synth: MagicMock,
-        mock_k8s_scaler: MagicMock,
     ) -> None:
         """Should not retry on validation errors (client's fault)."""
         mock_safe_synth.synthesize.side_effect = ValueError("Invalid input data")
@@ -157,7 +145,6 @@ class TestSyntheticSummariesRetry:
                 asset_context,
                 sample_input_df,
                 mock_safe_synth,
-                mock_k8s_scaler,
             )
 
         # Should only try once - no retries for validation errors
@@ -168,7 +155,6 @@ class TestSyntheticSummariesRetry:
         asset_context: AssetExecutionContext,
         sample_input_df: pl.DataFrame,
         mock_safe_synth: MagicMock,
-        mock_k8s_scaler: MagicMock,
     ) -> None:
         """Successful result should have proper synthetic markers."""
         mock_safe_synth.synthesize.return_value = (
@@ -186,7 +172,6 @@ class TestSyntheticSummariesRetry:
             asset_context,
             sample_input_df,
             mock_safe_synth,
-            mock_k8s_scaler,
         )
 
         # Should have synthetic reference

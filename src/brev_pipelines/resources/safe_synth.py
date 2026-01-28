@@ -670,11 +670,9 @@ size {file_size}
             },
             "generation": {
                 "num_records": len(data),
-                # Use JSON schema method instead of regex for structured generation
-                # Regex causes XGrammar -> Outlines fallback (CPU-bound, 0.1 rec/s)
-                # JSON schema uses native XGrammar (GPU-accelerated, 5x+ faster)
+                # Use default structured generation (let Safe Synthesizer choose backend)
+                # This ensures valid JSON output format
                 "use_structured_generation": True,
-                "structured_generation_schema_method": "json",
             },
         }
 

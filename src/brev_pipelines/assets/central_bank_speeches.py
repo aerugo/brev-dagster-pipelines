@@ -269,20 +269,23 @@ def cleaned_speeches(
     },
     # Run after classification and summaries complete - embeddings scales down
     # nim-reasoning to free GPU memory, which would break concurrent LLM calls
-    deps=[dg.AssetDep("speech_classification")],
+    deps=[dg.AssetDep("speech_classification"), dg.AssetDep("speech_summaries")],
 )
 def speech_embeddings(
     context: dg.AssetExecutionContext,
+    config: PipelineConfig,
     cleaned_speeches: pl.DataFrame,
-    speech_summaries: pl.DataFrame,
     nim_embedding: NIMEmbeddingResource,
     minio: MinIOResource,
+    lakefs: LakeFSResource,
     k8s_scaler: K8sScalerResource,
 ) -> tuple[pl.DataFrame, list[list[float]]]:
     """Generate embeddings for all speeches using local NIM.
 
     Uses the speech summary for embedding instead of full text to stay within
     the model's 512 token limit. Summaries are truncated to ~1500 chars to be safe.
+
+    Loads summaries directly from LakeFS snapshot to avoid IO manager storage issues.
 
     Uses nv-embedqa-e5-v5 model (1024 dimensions).
     Returns tuple of (DataFrame, embeddings) for downstream storage.
@@ -295,15 +298,32 @@ def speech_embeddings(
 
     Args:
         context: Dagster execution context for logging.
+        config: Pipeline configuration (is_trial for path selection).
         cleaned_speeches: Cleaned DataFrame with speech text.
-        speech_summaries: DataFrame with generated summaries.
         nim_embedding: NIM embedding resource for vector generation.
         minio: MinIO resource for checkpoint storage.
+        lakefs: LakeFS resource for loading summaries snapshot.
         k8s_scaler: Kubernetes scaler to manage GPU resources.
 
     Returns:
         Tuple of (DataFrame, list of 1024-dim embedding vectors).
     """
+    # Load summaries from LakeFS snapshot (avoids IO manager storage issues)
+    if config.is_trial:
+        summaries_path = "central-bank-speeches/trial/intermediate/summaries.parquet"
+    else:
+        summaries_path = "central-bank-speeches/intermediate/summaries.parquet"
+
+    context.log.info(f"Loading summaries from LakeFS: {summaries_path}")
+    lakefs_client = lakefs.get_client()
+    summaries_response = lakefs_client.objects_api.get_object(
+        repository="data",
+        ref="main",
+        path=summaries_path,
+    )
+    speech_summaries = pl.read_parquet(io.BytesIO(summaries_response))
+    context.log.info(f"Loaded {len(speech_summaries)} summaries from LakeFS")
+
     # Join summaries with cleaned speeches
     df = cleaned_speeches.join(
         speech_summaries.select(["reference", "summary"]),

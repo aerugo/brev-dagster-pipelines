@@ -833,22 +833,42 @@ class TestSpeechEmbeddings:
         return resource
 
     @pytest.fixture
-    def sample_summaries_df(self) -> pl.DataFrame:
-        """Create sample summaries for embedding."""
-        return pl.DataFrame(
+    def mock_lakefs_with_summaries(self) -> MagicMock:
+        """Create mock LakeFS resource that returns summaries."""
+        import io
+
+        # Create summaries DataFrame as parquet bytes
+        summaries_df = pl.DataFrame(
             {
                 "reference": ["BIS_001", "BIS_002"],
                 "summary": ["• Key point 1\n• Key point 2", "• Summary bullet"],
             }
         )
+        buffer = io.BytesIO()
+        summaries_df.write_parquet(buffer)
+        parquet_bytes = buffer.getvalue()
+
+        resource = MagicMock()
+        client = MagicMock()
+        client.objects_api.get_object.return_value = parquet_bytes
+        resource.get_client.return_value = client
+        return resource
+
+    @pytest.fixture
+    def mock_pipeline_config(self) -> MagicMock:
+        """Create mock pipeline config."""
+        config = MagicMock()
+        config.is_trial = False
+        return config
 
     def test_generates_embeddings_for_all_rows(
         self,
         asset_context: AssetExecutionContext,
         sample_cleaned_df: pl.DataFrame,
-        sample_summaries_df: pl.DataFrame,
         mock_nim_embedding: MagicMock,
         mock_minio_for_checkpoint: MagicMock,
+        mock_lakefs_with_summaries: MagicMock,
+        mock_pipeline_config: MagicMock,
         mock_k8s_scaler: MagicMock,
     ) -> None:
         """Test speech_embeddings generates embeddings for all rows."""
@@ -876,10 +896,11 @@ class TestSpeechEmbeddings:
             mock_checkpoint_cls.return_value.cleanup = MagicMock()
             df, embeddings = speech_embeddings(
                 asset_context,
+                mock_pipeline_config,
                 sample_cleaned_df,
-                sample_summaries_df,
                 mock_nim_embedding,
                 mock_minio_for_checkpoint,
+                mock_lakefs_with_summaries,
                 mock_k8s_scaler,
             )
 

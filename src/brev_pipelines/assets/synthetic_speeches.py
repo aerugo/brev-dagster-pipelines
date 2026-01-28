@@ -88,11 +88,14 @@ SYNTHETIC_SCHEMA: list[WeaviatePropertyDef] = [
 @dg.asset(
     description="Load enriched speeches data product from LakeFS for synthesis",
     group_name="synthetic_speeches",
-    deps=["speeches_data_product"],  # Explicit dependency on speeches pipeline completion
+    # No explicit dependency - data is loaded from LakeFS directly.
+    # The LakeFS file check provides the guard: if enriched_speeches.parquet
+    # doesn't exist, this asset will fail with a clear error message.
+    # Run speeches_full_run or speeches_trial_run first to create the data.
     metadata={
         "layer": "input",
         "source": "lakefs",
-        "depends_on": "speeches_data_product",
+        "upstream": "enriched_speeches (production) or trial/enriched_speeches (trial)",
     },
 )
 def enriched_data_for_synthesis(
@@ -116,11 +119,13 @@ def enriched_data_for_synthesis(
         DataFrame with enriched speeches including summaries.
     """
     # Determine path based on trial mode
+    # The LakeFSPolarsIOManager writes to {base_path}/{asset_name}.parquet
+    # or {base_path}/trial/{asset_name}.parquet for trial runs
     if config.is_trial:
-        path = "central-bank-speeches/trial/speeches.parquet"
+        path = "central-bank-speeches/trial/enriched_speeches.parquet"
         context.log.info("TRIAL RUN: Loading from trial-specific LakeFS path")
     else:
-        path = "central-bank-speeches/speeches.parquet"
+        path = "central-bank-speeches/enriched_speeches.parquet"
 
     context.log.info(f"Loading enriched speeches from lakefs://data/main/{path}")
 

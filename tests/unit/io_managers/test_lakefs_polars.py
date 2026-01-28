@@ -391,3 +391,196 @@ class TestLakeFSPolarsIOManagerTypeAnnotations:
         assert LakeFSPolarsIOManager.model_fields["repository"].description is not None
         assert LakeFSPolarsIOManager.model_fields["branch"].description is not None
         assert LakeFSPolarsIOManager.model_fields["base_path"].description is not None
+
+
+class TestLakeFSPolarsIOManagerTrialMode:
+    """Tests for trial mode path handling."""
+
+    @patch("brev_pipelines.io_managers.lakefs_polars.CommitCreation")
+    @patch("brev_pipelines.resources.minio.Minio")
+    @patch("lakefs_sdk.client.LakeFSClient")
+    def test_trial_mode_uses_trial_path(
+        self,
+        mock_lakefs_class: MagicMock,
+        mock_minio_class: MagicMock,
+        mock_commit_creation: MagicMock,
+        sample_speeches_df: pl.DataFrame,
+    ) -> None:
+        """Test is_trial=True writes to trial/ subdirectory."""
+        mock_lakefs_client = MagicMock()
+        mock_lakefs_class.return_value = mock_lakefs_client
+        mock_minio_class.return_value = MagicMock()
+
+        lakefs_resource = LakeFSResource(
+            endpoint="http://localhost:8000",
+            access_key="test",
+            secret_key="test",
+        )
+        minio_resource = MinIOResource(
+            endpoint="localhost:9000",
+            access_key="test",
+            secret_key="test",
+        )
+
+        manager = LakeFSPolarsIOManager(
+            lakefs=lakefs_resource,
+            minio=minio_resource,
+            base_path="central-bank-speeches",
+            is_trial=True,  # Enable trial mode
+        )
+
+        context = build_output_context(
+            asset_key=AssetKey(["raw_speeches"]),
+            run_id="run-12345678",
+        )
+
+        manager.handle_output(context, sample_speeches_df)
+
+        # Verify path includes trial/ prefix
+        upload_call = mock_lakefs_client.objects_api.upload_object.call_args
+        assert upload_call.kwargs["path"] == "central-bank-speeches/trial/raw_speeches.parquet"
+
+    @patch("brev_pipelines.io_managers.lakefs_polars.CommitCreation")
+    @patch("brev_pipelines.resources.minio.Minio")
+    @patch("lakefs_sdk.client.LakeFSClient")
+    def test_production_mode_uses_standard_path(
+        self,
+        mock_lakefs_class: MagicMock,
+        mock_minio_class: MagicMock,
+        mock_commit_creation: MagicMock,
+        sample_speeches_df: pl.DataFrame,
+    ) -> None:
+        """Test is_trial=False (default) uses standard path."""
+        mock_lakefs_client = MagicMock()
+        mock_lakefs_class.return_value = mock_lakefs_client
+        mock_minio_class.return_value = MagicMock()
+
+        lakefs_resource = LakeFSResource(
+            endpoint="http://localhost:8000",
+            access_key="test",
+            secret_key="test",
+        )
+        minio_resource = MinIOResource(
+            endpoint="localhost:9000",
+            access_key="test",
+            secret_key="test",
+        )
+
+        manager = LakeFSPolarsIOManager(
+            lakefs=lakefs_resource,
+            minio=minio_resource,
+            base_path="central-bank-speeches",
+            is_trial=False,  # Production mode (default)
+        )
+
+        context = build_output_context(
+            asset_key=AssetKey(["raw_speeches"]),
+            run_id="run-12345678",
+        )
+
+        manager.handle_output(context, sample_speeches_df)
+
+        # Verify path does NOT include trial/
+        upload_call = mock_lakefs_client.objects_api.upload_object.call_args
+        assert upload_call.kwargs["path"] == "central-bank-speeches/raw_speeches.parquet"
+
+    @patch("brev_pipelines.resources.minio.Minio")
+    @patch("lakefs_sdk.client.LakeFSClient")
+    def test_load_input_uses_trial_path(
+        self,
+        mock_lakefs_class: MagicMock,
+        mock_minio_class: MagicMock,
+        sample_speeches_df: pl.DataFrame,
+    ) -> None:
+        """Test load_input uses trial path when is_trial=True."""
+        buffer = io.BytesIO()
+        sample_speeches_df.write_parquet(buffer)
+        parquet_bytes = bytearray(buffer.getvalue())
+
+        mock_lakefs_client = MagicMock()
+        mock_lakefs_client.objects_api.get_object.return_value = parquet_bytes
+        mock_lakefs_class.return_value = mock_lakefs_client
+        mock_minio_class.return_value = MagicMock()
+
+        lakefs_resource = LakeFSResource(
+            endpoint="http://localhost:8000",
+            access_key="test",
+            secret_key="test",
+        )
+        minio_resource = MinIOResource(
+            endpoint="localhost:9000",
+            access_key="test",
+            secret_key="test",
+        )
+
+        manager = LakeFSPolarsIOManager(
+            lakefs=lakefs_resource,
+            minio=minio_resource,
+            base_path="central-bank-speeches",
+            is_trial=True,
+        )
+
+        context = build_input_context(asset_key=AssetKey(["raw_speeches"]))
+        manager.load_input(context)
+
+        # Verify get_object uses trial path
+        mock_lakefs_client.objects_api.get_object.assert_called_once_with(
+            repository="data",
+            ref="main",
+            path="central-bank-speeches/trial/raw_speeches.parquet",
+        )
+
+
+class TestLakeFSPolarsIOManagerEmptyDataFrame:
+    """Tests for empty DataFrame handling."""
+
+    @patch("brev_pipelines.io_managers.lakefs_polars.CommitCreation")
+    @patch("brev_pipelines.resources.minio.Minio")
+    @patch("lakefs_sdk.client.LakeFSClient")
+    def test_handles_empty_dataframe(
+        self,
+        mock_lakefs_class: MagicMock,
+        mock_minio_class: MagicMock,
+        mock_commit_creation: MagicMock,
+    ) -> None:
+        """Test empty DataFrame is handled gracefully."""
+        mock_lakefs_client = MagicMock()
+        mock_lakefs_class.return_value = mock_lakefs_client
+        mock_minio_class.return_value = MagicMock()
+
+        lakefs_resource = LakeFSResource(
+            endpoint="http://localhost:8000",
+            access_key="test",
+            secret_key="test",
+        )
+        minio_resource = MinIOResource(
+            endpoint="localhost:9000",
+            access_key="test",
+            secret_key="test",
+        )
+
+        manager = LakeFSPolarsIOManager(
+            lakefs=lakefs_resource,
+            minio=minio_resource,
+        )
+
+        # Create empty DataFrame with schema
+        empty_df = pl.DataFrame({"reference": [], "text": []}).cast(
+            {"reference": pl.Utf8, "text": pl.Utf8}
+        )
+
+        context = build_output_context(
+            asset_key=AssetKey(["empty_asset"]),
+            run_id="run-12345678",
+        )
+
+        # Should not raise, should still upload the empty parquet
+        manager.handle_output(context, empty_df)
+
+        # Verify upload was called with empty dataframe
+        mock_lakefs_client.objects_api.upload_object.assert_called_once()
+
+        # Verify commit metadata shows 0 rows
+        mock_commit_creation.assert_called_once()
+        call_kwargs = mock_commit_creation.call_args.kwargs
+        assert call_kwargs["metadata"]["num_rows"] == "0"

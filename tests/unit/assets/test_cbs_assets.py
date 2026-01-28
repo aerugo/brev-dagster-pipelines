@@ -3,18 +3,18 @@
 Tests the CBS (Central Bank Speeches) asset functions including:
 - cleaned_speeches: Data cleaning with null fills and filtering
 - enriched_speeches: Data combination from multiple sources
-- classification_snapshot: LakeFS persistence
 
 Kaggle-dependent assets (raw_speeches) and LLM-dependent assets
 (speech_classification, speech_summaries, speech_embeddings) are tested
 for their helper functions and core logic, with external calls mocked.
+
+Note: Snapshot assets were removed - IO manager now handles persistence.
 """
 
 from __future__ import annotations
 
-import io
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import polars as pl
@@ -25,15 +25,12 @@ from brev_pipelines.assets.central_bank_speeches import (
     OUTLOOK_SCALE,
     SPEECHES_SCHEMA,
     TRADE_STANCE_SCALE,
-    classification_snapshot,
     cleaned_speeches,
-    embeddings_snapshot,
     enriched_speeches,
     speech_classification,
     speech_embeddings,
     speech_summaries,
     speeches_data_product,
-    summaries_snapshot,
     weaviate_index,
 )
 from brev_pipelines.config import PipelineConfig
@@ -303,7 +300,12 @@ class TestEnrichedSpeeches:
 
 
 class TestSpeechesDataProduct:
-    """Tests for speeches_data_product asset."""
+    """Tests for speeches_data_product asset.
+
+    Note: This asset no longer writes to LakeFS directly.
+    The enriched_speeches asset handles persistence via IO manager.
+    This asset now only computes and returns statistics.
+    """
 
     @pytest.fixture
     def sample_enriched_df(self) -> pl.DataFrame:
@@ -317,119 +319,46 @@ class TestSpeechesDataProduct:
                 "trade_stance": [3, 5, 1],
                 "tariff_mention": [0, 1, 0],
                 "economic_outlook": [4, 3, 2],
+                "is_gov": [1, 0, 1],
             }
         )
 
-    @pytest.fixture
-    def pipeline_config(self) -> PipelineConfig:
-        """Create pipeline config."""
-        return PipelineConfig(is_trial=False, sample_size=0)
-
-    @pytest.fixture
-    def mock_lakefs_with_client(self) -> MagicMock:
-        """Create mock LakeFS resource with properly structured client."""
-        resource = MagicMock()
-        client = MagicMock()
-
-        # Set up objects_api
-        client.objects_api = MagicMock()
-        client.objects_api.upload_object = MagicMock()
-
-        # Set up commits_api
-        client.commits_api = MagicMock()
-        mock_commit = MagicMock()
-        mock_commit.id = "commit123"
-        client.commits_api.commit = MagicMock(return_value=mock_commit)
-
-        resource.get_client = MagicMock(return_value=client)
-        return resource
-
-    def test_uploads_to_lakefs(
+    def test_returns_statistics(
         self,
         asset_context: AssetExecutionContext,
         sample_enriched_df: pl.DataFrame,
-        pipeline_config: PipelineConfig,
-        mock_lakefs_with_client: MagicMock,
     ) -> None:
-        """Test speeches_data_product uploads to LakeFS."""
-        speeches_data_product(
-            asset_context,
-            pipeline_config,
-            sample_enriched_df,
-            mock_lakefs_with_client,
-            embeddings_snapshot={"path": "mock", "commit_id": "mock"},
-        )
-
-        mock_client = mock_lakefs_with_client.get_client.return_value
-        mock_client.objects_api.upload_object.assert_called_once()
-        call_kwargs = mock_client.objects_api.upload_object.call_args.kwargs
-        assert call_kwargs["repository"] == "data"
-        assert call_kwargs["branch"] == "main"
-        assert "speeches.parquet" in call_kwargs["path"]
-
-    def test_returns_metadata(
-        self,
-        asset_context: AssetExecutionContext,
-        sample_enriched_df: pl.DataFrame,
-        pipeline_config: PipelineConfig,
-        mock_lakefs_with_client: MagicMock,
-    ) -> None:
-        """Test speeches_data_product returns correct metadata."""
+        """Test speeches_data_product returns correct statistics."""
         result = speeches_data_product(
             asset_context,
-            pipeline_config,
             sample_enriched_df,
-            mock_lakefs_with_client,
-            embeddings_snapshot={"path": "mock", "commit_id": "mock"},
         )
 
         assert result["num_records"] == 3
         assert result["tariff_mentions"] == 1  # BIS_002 has tariff_mention=1
-        assert result["commit_id"] == "commit123"
-        assert "lakefs://" in result["path"]
+        assert result["governor_speeches"] == 2  # BIS_001 and BIS_003 have is_gov=1
 
-    def test_uses_trial_path(
+    def test_handles_empty_dataframe(
         self,
         asset_context: AssetExecutionContext,
-        sample_enriched_df: pl.DataFrame,
-        mock_lakefs_with_client: MagicMock,
     ) -> None:
-        """Test speeches_data_product uses trial path when is_trial=True."""
-        config = PipelineConfig(is_trial=True)
-
-        speeches_data_product(
-            asset_context,
-            config,
-            sample_enriched_df,
-            mock_lakefs_with_client,
-            embeddings_snapshot={"path": "mock", "commit_id": "mock"},
-        )
-
-        mock_client = mock_lakefs_with_client.get_client.return_value
-        call_kwargs = mock_client.objects_api.upload_object.call_args.kwargs
-        assert "trial" in call_kwargs["path"]
-
-    def test_handles_no_changes_error(
-        self,
-        asset_context: AssetExecutionContext,
-        sample_enriched_df: pl.DataFrame,
-        pipeline_config: PipelineConfig,
-        mock_lakefs_with_client: MagicMock,
-    ) -> None:
-        """Test speeches_data_product handles 'no changes' error gracefully."""
-        mock_client = mock_lakefs_with_client.get_client.return_value
-        mock_client.commits_api.commit.side_effect = Exception("no changes to commit")
+        """Test speeches_data_product handles empty DataFrame."""
+        empty_df = pl.DataFrame(
+            {
+                "reference": [],
+                "tariff_mention": [],
+                "is_gov": [],
+            }
+        ).cast({"reference": pl.Utf8, "tariff_mention": pl.Int64, "is_gov": pl.Int64})
 
         result = speeches_data_product(
             asset_context,
-            pipeline_config,
-            sample_enriched_df,
-            mock_lakefs_with_client,
-            embeddings_snapshot={"path": "mock", "commit_id": "mock"},
+            empty_df,
         )
 
-        # Should still return result with None commit_id
-        assert result["commit_id"] is None
+        assert result["num_records"] == 0
+        assert result["tariff_mentions"] == 0
+        assert result["governor_speeches"] == 0
 
 
 class TestWeaviateIndex:
@@ -564,225 +493,6 @@ class TestWeaviateIndex:
         assert result["vector_dimensions"] == 1024
 
 
-class TestClassificationSnapshot:
-    """Tests for classification_snapshot asset."""
-
-    @pytest.fixture
-    def sample_classification_df(self) -> pl.DataFrame:
-        """Create sample classification results."""
-        return pl.DataFrame(
-            {
-                "reference": ["BIS_001", "BIS_002", "BIS_003"],
-                "title": ["Speech 1", "Speech 2", "Speech 3"],
-                "monetary_stance": [3, 4, 2],
-                "trade_stance": [3, 5, 1],
-                "tariff_mention": [0, 1, 1],
-                "economic_outlook": [4, 3, 2],
-            }
-        )
-
-    @pytest.fixture
-    def pipeline_config(self) -> PipelineConfig:
-        """Create pipeline config."""
-        return PipelineConfig(is_trial=False)
-
-    @pytest.fixture
-    def mock_lakefs_with_client(self) -> MagicMock:
-        """Create mock LakeFS resource with properly structured client."""
-        resource = MagicMock()
-        client = MagicMock()
-        client.objects_api = MagicMock()
-        client.commits_api = MagicMock()
-        mock_commit = MagicMock()
-        mock_commit.id = "snap123"
-        client.commits_api.commit = MagicMock(return_value=mock_commit)
-        resource.get_client = MagicMock(return_value=client)
-        return resource
-
-    def test_uploads_classification_columns_only(
-        self,
-        asset_context: AssetExecutionContext,
-        sample_classification_df: pl.DataFrame,
-        pipeline_config: PipelineConfig,
-        mock_lakefs_with_client: MagicMock,
-    ) -> None:
-        """Test classification_snapshot only uploads relevant columns."""
-        mock_client = mock_lakefs_with_client.get_client.return_value
-
-        # Capture uploaded content
-        captured_content: list[bytes] = []
-
-        def capture_upload(**kwargs: Any) -> None:
-            captured_content.append(kwargs["content"])
-
-        mock_client.objects_api.upload_object.side_effect = capture_upload
-
-        classification_snapshot(
-            asset_context,
-            pipeline_config,
-            sample_classification_df,
-            mock_lakefs_with_client,
-        )
-
-        # Parse uploaded parquet and check columns
-        uploaded_df = pl.read_parquet(io.BytesIO(captured_content[0]))
-        assert "reference" in uploaded_df.columns
-        assert "monetary_stance" in uploaded_df.columns
-        assert "title" not in uploaded_df.columns  # Should be excluded
-
-    def test_returns_correct_metadata(
-        self,
-        asset_context: AssetExecutionContext,
-        sample_classification_df: pl.DataFrame,
-        pipeline_config: PipelineConfig,
-        mock_lakefs_with_client: MagicMock,
-    ) -> None:
-        """Test classification_snapshot returns correct metadata."""
-        result = classification_snapshot(
-            asset_context,
-            pipeline_config,
-            sample_classification_df,
-            mock_lakefs_with_client,
-        )
-
-        assert result["num_records"] == 3
-        assert result["commit_id"] == "snap123"
-        assert "classifications.parquet" in result["path"]
-
-
-class TestSummariesSnapshot:
-    """Tests for summaries_snapshot asset."""
-
-    @pytest.fixture
-    def sample_summaries_df(self) -> pl.DataFrame:
-        """Create sample summaries results."""
-        return pl.DataFrame(
-            {
-                "reference": ["BIS_001", "BIS_002", "BIS_003"],
-                "summary": [
-                    "Summary with specific metrics: 2.5% inflation",
-                    "Summary discussing trade policy and tariffs",
-                    None,  # One null summary
-                ],
-            }
-        )
-
-    @pytest.fixture
-    def pipeline_config(self) -> PipelineConfig:
-        """Create pipeline config."""
-        return PipelineConfig(is_trial=False)
-
-    @pytest.fixture
-    def mock_lakefs_with_client(self) -> MagicMock:
-        """Create mock LakeFS resource with properly structured client."""
-        resource = MagicMock()
-        client = MagicMock()
-        client.objects_api = MagicMock()
-        client.commits_api = MagicMock()
-        mock_commit = MagicMock()
-        mock_commit.id = "sum123"
-        client.commits_api.commit = MagicMock(return_value=mock_commit)
-        resource.get_client = MagicMock(return_value=client)
-        return resource
-
-    def test_counts_non_null_summaries(
-        self,
-        asset_context: AssetExecutionContext,
-        sample_summaries_df: pl.DataFrame,
-        pipeline_config: PipelineConfig,
-        mock_lakefs_with_client: MagicMock,
-    ) -> None:
-        """Test summaries_snapshot counts non-null summaries."""
-        # Mock classification_snapshot dependency (just needs to be a dict)
-        mock_classification_snapshot: dict[str, object] = {"path": "test", "commit_id": "abc123"}
-        result = summaries_snapshot(
-            asset_context,
-            pipeline_config,
-            sample_summaries_df,
-            mock_lakefs_with_client,
-            mock_classification_snapshot,
-        )
-
-        assert result["num_records"] == 3
-        assert result["summaries_with_content"] == 2  # One is null
-
-
-class TestEmbeddingsSnapshot:
-    """Tests for embeddings_snapshot asset."""
-
-    @pytest.fixture
-    def sample_embeddings_tuple(self) -> tuple[pl.DataFrame, list[list[float]]]:
-        """Create sample embeddings tuple."""
-        df = pl.DataFrame(
-            {
-                "reference": ["BIS_001", "BIS_002"],
-            }
-        )
-        embeddings = [[0.1] * 1024, [0.2] * 1024]
-        return df, embeddings
-
-    @pytest.fixture
-    def pipeline_config(self) -> PipelineConfig:
-        """Create pipeline config."""
-        return PipelineConfig(is_trial=False)
-
-    @pytest.fixture
-    def mock_lakefs_with_client(self) -> MagicMock:
-        """Create mock LakeFS resource with properly structured client."""
-        resource = MagicMock()
-        client = MagicMock()
-        client.objects_api = MagicMock()
-        client.commits_api = MagicMock()
-        mock_commit = MagicMock()
-        mock_commit.id = "emb123"
-        client.commits_api.commit = MagicMock(return_value=mock_commit)
-        resource.get_client = MagicMock(return_value=client)
-        return resource
-
-    def test_stores_embeddings_with_references(
-        self,
-        asset_context: AssetExecutionContext,
-        sample_embeddings_tuple: tuple[pl.DataFrame, list[list[float]]],
-        pipeline_config: PipelineConfig,
-        mock_lakefs_with_client: MagicMock,
-    ) -> None:
-        """Test embeddings_snapshot stores embeddings with references."""
-        # Mock summaries_snapshot dependency (just needs to be a dict)
-        mock_summaries_snapshot: dict[str, object] = {"path": "test", "commit_id": "abc123"}
-        result = embeddings_snapshot(
-            asset_context,
-            pipeline_config,
-            sample_embeddings_tuple,
-            mock_lakefs_with_client,
-            mock_summaries_snapshot,
-        )
-
-        assert result["num_records"] == 2
-        assert result["dimensions"] == 1024
-        assert "embeddings.parquet" in result["path"]
-
-    def test_reports_size_mb(
-        self,
-        asset_context: AssetExecutionContext,
-        sample_embeddings_tuple: tuple[pl.DataFrame, list[list[float]]],
-        pipeline_config: PipelineConfig,
-        mock_lakefs_with_client: MagicMock,
-    ) -> None:
-        """Test embeddings_snapshot reports size in MB."""
-        # Mock summaries_snapshot dependency (just needs to be a dict)
-        mock_summaries_snapshot: dict[str, object] = {"path": "test", "commit_id": "abc123"}
-        result = embeddings_snapshot(
-            asset_context,
-            pipeline_config,
-            sample_embeddings_tuple,
-            mock_lakefs_with_client,
-            mock_summaries_snapshot,
-        )
-
-        assert "size_mb" in result
-        assert result["size_mb"] > 0
-
-
 class TestSpeechEmbeddings:
     """Tests for speech_embeddings asset with checkpointing."""
 
@@ -833,40 +543,22 @@ class TestSpeechEmbeddings:
         return resource
 
     @pytest.fixture
-    def mock_lakefs_with_summaries(self) -> MagicMock:
-        """Create mock LakeFS resource that returns summaries."""
-        import io
-
-        # Create summaries DataFrame as parquet bytes
-        summaries_df = pl.DataFrame(
+    def sample_summaries_df(self) -> pl.DataFrame:
+        """Create sample summaries DataFrame (received from IO manager)."""
+        return pl.DataFrame(
             {
                 "reference": ["BIS_001", "BIS_002"],
                 "summary": ["• Key point 1\n• Key point 2", "• Summary bullet"],
             }
         )
-        buffer = io.BytesIO()
-        summaries_df.write_parquet(buffer)
-        parquet_bytes = buffer.getvalue()
-
-        resource = MagicMock()
-        client = MagicMock()
-        client.objects_api.get_object.return_value = parquet_bytes
-        resource.get_client.return_value = client
-        return resource
-
-    @pytest.fixture
-    def pipeline_config(self) -> PipelineConfig:
-        """Create pipeline config for test."""
-        return PipelineConfig(sample_size=0, is_trial=False)
 
     def test_generates_embeddings_for_all_rows(
         self,
         asset_context: AssetExecutionContext,
         sample_cleaned_df: pl.DataFrame,
+        sample_summaries_df: pl.DataFrame,
         mock_nim_embedding: MagicMock,
         mock_minio_for_checkpoint: MagicMock,
-        mock_lakefs_with_summaries: MagicMock,
-        pipeline_config: PipelineConfig,
         mock_k8s_scaler: MagicMock,
     ) -> None:
         """Test speech_embeddings generates embeddings for all rows."""
@@ -894,11 +586,10 @@ class TestSpeechEmbeddings:
             mock_checkpoint_cls.return_value.cleanup = MagicMock()
             df, embeddings = speech_embeddings(
                 asset_context,
-                pipeline_config,
                 sample_cleaned_df,
+                sample_summaries_df,
                 mock_nim_embedding,
                 mock_minio_for_checkpoint,
-                mock_lakefs_with_summaries,
                 mock_k8s_scaler,
             )
 

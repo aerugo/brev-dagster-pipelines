@@ -14,6 +14,7 @@ from brev_pipelines.assets.demo import demo_assets
 from brev_pipelines.assets.health import health_assets
 from brev_pipelines.assets.synthetic_speeches import synthetic_speeches_assets
 from brev_pipelines.assets.validation import validation_assets
+from brev_pipelines.io_managers.lakefs_polars import LakeFSPolarsIOManager
 from brev_pipelines.jobs import all_jobs
 from brev_pipelines.resources.k8s_scaler import K8sScalerResource
 from brev_pipelines.resources.lakefs import LakeFSResource
@@ -123,6 +124,23 @@ defs = Definitions(
         "k8s_scaler": K8sScalerResource(
             in_cluster=_is_running_in_kubernetes(),
             ready_timeout=_env_int("K8S_READY_TIMEOUT", 600),
+        ),
+        "lakefs_parquet": LakeFSPolarsIOManager(
+            lakefs=LakeFSResource(
+                endpoint=_env("LAKEFS_ENDPOINT", "lakefs.lakefs.svc.cluster.local:8000"),
+                access_key=EnvVar("LAKEFS_ACCESS_KEY_ID"),
+                secret_key=EnvVar("LAKEFS_SECRET_ACCESS_KEY"),
+            ),
+            minio=MinIOResource(
+                endpoint=_env("MINIO_ENDPOINT", "minio.minio.svc.cluster.local:9000"),
+                access_key=EnvVar("MINIO_ACCESS_KEY"),
+                secret_key=EnvVar("MINIO_SECRET_KEY"),
+                secure=False,
+            ),
+            repository="data",
+            branch="main",
+            base_path="central-bank-speeches",
+            is_trial=_env_bool("IS_TRIAL", default=False),
         ),
     },
 )

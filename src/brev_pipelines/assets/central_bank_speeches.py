@@ -22,7 +22,6 @@ Trial Run Mode:
     - Or use run config: {"ops": {"raw_speeches": {"config": {"sample_size": 10}}}}
 """
 
-import io
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -32,7 +31,6 @@ import polars as pl
 from brev_pipelines.config import PipelineConfig
 from brev_pipelines.io_managers.checkpoint import LLMCheckpointManager, process_with_checkpoint
 from brev_pipelines.resources.k8s_scaler import K8sScalerResource
-from brev_pipelines.resources.lakefs import LakeFSConnectionError, LakeFSError, LakeFSResource
 from brev_pipelines.resources.llm_retry import (
     RetryConfig,
     retry_classification,
@@ -85,26 +83,24 @@ SPEECHES_SCHEMA: list[WeaviatePropertyDef] = [
 @dg.asset(
     description="Raw central bank speeches from Kaggle dataset",
     group_name="central_bank_speeches",
+    io_manager_key="lakefs_parquet",
     metadata={
         "layer": "raw",
         "source": "kaggle/davidgauthier/central-bank-speeches",
-        "destination": "lakefs",
     },
 )
 def raw_speeches(
     context: dg.AssetExecutionContext,
     config: PipelineConfig,
-    lakefs: LakeFSResource,
 ) -> pl.DataFrame:
     """Ingest central bank speeches dataset from Kaggle.
 
-    Downloads the dataset using KaggleHub and stores raw data in LakeFS
-    for version control of source material.
+    Downloads the dataset using KaggleHub. The IO manager handles
+    persistence to LakeFS with automatic versioning.
 
     Args:
         context: Dagster execution context for logging.
         config: Pipeline configuration (sample_size for trial runs).
-        lakefs: LakeFS resource for versioned data storage.
 
     Returns:
         Raw speeches DataFrame from Kaggle.
@@ -112,7 +108,6 @@ def raw_speeches(
     import os
 
     import kagglehub
-    from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
 
     context.log.info("Downloading central-bank-speeches dataset from Kaggle...")
 
@@ -145,69 +140,18 @@ def raw_speeches(
             f"TRIAL RUN: Limited to {config.sample_size} records (from {original_count})"
         )
 
-    # Serialize to Parquet
-    buffer = io.BytesIO()
-    df.write_parquet(buffer)
-    parquet_bytes = buffer.getvalue()
-
-    # Get LakeFS client with proper exception handling
-    try:
-        lakefs_client = lakefs.get_client()
-    except LakeFSConnectionError as e:
-        raise RuntimeError(
-            f"Cannot connect to LakeFS to store raw speeches. "
-            f"Ensure LakeFS is running and accessible. Details: {e}"
-        ) from e
-
-    # Upload raw data to LakeFS
-    path = "central-bank-speeches/raw_speeches.parquet"
-    try:
-        lakefs_client.objects_api.upload_object(
-            repository="data",
-            branch="main",
-            path=path,
-            content=parquet_bytes,
-        )
-    except LakeFSError as e:
-        raise RuntimeError(f"Failed to upload raw speeches to LakeFS: {e}") from e
-
-    # Create commit for versioned raw data (skip if no changes)
-    # Note: Direct SDK calls raise standard exceptions, not LakeFSError
-    try:
-        commit = lakefs_client.commits_api.commit(
-            repository="data",
-            branch="main",
-            commit_creation=CommitCreation(
-                message=f"Ingest raw central bank speeches ({len(df)} records)",
-                metadata={
-                    "dagster_run_id": context.run_id or "",
-                    "source": "kaggle/davidgauthier/central-bank-speeches",
-                    "num_records": str(len(df)),
-                    "sample_size": str(config.sample_size) if config.sample_size > 0 else "full",
-                },
-                date=None,
-                allow_empty=False,
-            ),
-        )
-        context.log.info(f"LakeFS commit: {commit.id}")
-    except Exception as e:
-        if "no changes" in str(e).lower():
-            context.log.info("No changes to commit (data already exists in LakeFS)")
-        else:
-            raise
-
-    context.log.info(f"Stored raw data to LakeFS: lakefs://data/main/{path}")
-
     # Log column info
     context.log.info(f"Columns: {df.columns}")
     context.log.info(f"Schema: {df.schema}")
 
+    # IO manager handles persistence to LakeFS
     return df
 
 
 @dg.asset(
     description="Cleaned speeches with null values filled",
     group_name="central_bank_speeches",
+    io_manager_key="lakefs_parquet",
     metadata={"layer": "cleaned"},
 )
 def cleaned_speeches(
@@ -267,25 +211,22 @@ def cleaned_speeches(
         "layer": "enriched",
         "uses_nim_embedding": "true",
     },
-    # Run after classification and summaries complete - embeddings scales down
+    # Run after classification completes - embeddings scales down
     # nim-reasoning to free GPU memory, which would break concurrent LLM calls
-    deps=[dg.AssetDep("speech_classification"), dg.AssetDep("speech_summaries")],
+    deps=[dg.AssetDep("speech_classification")],
 )
 def speech_embeddings(
     context: dg.AssetExecutionContext,
-    config: PipelineConfig,
     cleaned_speeches: pl.DataFrame,
+    speech_summaries: pl.DataFrame,
     nim_embedding: NIMEmbeddingResource,
     minio: MinIOResource,
-    lakefs: LakeFSResource,
     k8s_scaler: K8sScalerResource,
 ) -> tuple[pl.DataFrame, list[list[float]]]:
     """Generate embeddings for all speeches using local NIM.
 
     Uses the speech summary for embedding instead of full text to stay within
     the model's 512 token limit. Summaries are truncated to ~1500 chars to be safe.
-
-    Loads summaries directly from LakeFS snapshot to avoid IO manager storage issues.
 
     Uses nv-embedqa-e5-v5 model (1024 dimensions).
     Returns tuple of (DataFrame, embeddings) for downstream storage.
@@ -298,31 +239,16 @@ def speech_embeddings(
 
     Args:
         context: Dagster execution context for logging.
-        config: Pipeline configuration (is_trial for path selection).
         cleaned_speeches: Cleaned DataFrame with speech text.
+        speech_summaries: DataFrame with speech summaries from IO manager.
         nim_embedding: NIM embedding resource for vector generation.
         minio: MinIO resource for checkpoint storage.
-        lakefs: LakeFS resource for loading summaries snapshot.
         k8s_scaler: Kubernetes scaler to manage GPU resources.
 
     Returns:
         Tuple of (DataFrame, list of 1024-dim embedding vectors).
     """
-    # Load summaries from LakeFS snapshot (avoids IO manager storage issues)
-    if config.is_trial:
-        summaries_path = "central-bank-speeches/trial/intermediate/summaries.parquet"
-    else:
-        summaries_path = "central-bank-speeches/intermediate/summaries.parquet"
-
-    context.log.info(f"Loading summaries from LakeFS: {summaries_path}")
-    lakefs_client = lakefs.get_client()
-    summaries_response = lakefs_client.objects_api.get_object(
-        repository="data",
-        ref="main",
-        path=summaries_path,
-    )
-    speech_summaries = pl.read_parquet(io.BytesIO(summaries_response))
-    context.log.info(f"Loaded {len(speech_summaries)} summaries from LakeFS")
+    context.log.info(f"Received {len(speech_summaries)} summaries from IO manager")
 
     # Join summaries with cleaned speeches
     df = cleaned_speeches.join(
@@ -529,6 +455,7 @@ Classification: {"monetary_stance": "somewhat_dovish", "trade_stance": "very_pro
 @dg.asset(
     description="Multi-dimensional speech classification using GPT-OSS 120B",
     group_name="central_bank_speeches",
+    io_manager_key="lakefs_parquet",
     metadata={
         "layer": "enriched",
         "uses_gpu": "true",
@@ -778,6 +705,7 @@ def speech_classification(
 @dg.asset(
     description="Compact speech summaries for Safe Synthesizer training",
     group_name="central_bank_speeches",
+    io_manager_key="lakefs_parquet",
     metadata={
         "layer": "enriched",
         "uses_gpu": "true",
@@ -993,6 +921,7 @@ def speech_summaries(
 @dg.asset(
     description="Combined enriched speeches data product with summaries",
     group_name="central_bank_speeches",
+    io_manager_key="lakefs_parquet",
     metadata={"layer": "product"},
 )
 def enriched_speeches(
@@ -1103,106 +1032,51 @@ def enriched_speeches(
 
 
 @dg.asset(
-    description="Versioned data product stored in LakeFS",
+    description="Data product metadata and statistics",
     group_name="central_bank_speeches",
     metadata={
         "layer": "output",
-        "destination": "lakefs",
     },
 )
 def speeches_data_product(
     context: dg.AssetExecutionContext,
-    config: PipelineConfig,
     enriched_speeches: pl.DataFrame,
-    lakefs: LakeFSResource,
-    embeddings_snapshot: dict[str, Any],  # Dependency to prevent concurrent commits
 ) -> dict[str, Any]:
-    """Store final data product in LakeFS with versioning.
+    """Compute and return metadata about the final data product.
 
-    Creates a versioned Parquet file in LakeFS for downstream consumption.
-    Uses trial-specific path when is_trial=True to keep trial data separate.
-
-    Depends on embeddings_snapshot to ensure sequential LakeFS commits
-    (prevents "predicate failed" errors from concurrent commits).
+    The enriched_speeches asset is persisted to LakeFS via the IO manager.
+    This asset computes statistics for observability.
 
     Args:
         context: Dagster execution context for logging.
-        config: Pipeline configuration (is_trial for path selection).
-        enriched_speeches: Final enriched DataFrame.
-        lakefs: LakeFS resource for data versioning.
-        embeddings_snapshot: Previous snapshot (unused, forces sequential execution).
+        enriched_speeches: Final enriched DataFrame (persisted by IO manager).
 
     Returns:
-        Dictionary with storage metadata (path, commit_id, counts).
+        Dictionary with data product statistics.
     """
-    del embeddings_snapshot  # Unused, exists only to enforce dependency
-    from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
-
     df = enriched_speeches
 
-    # Serialize to Parquet
-    buffer = io.BytesIO()
-    df.write_parquet(buffer)
-    parquet_bytes = buffer.getvalue()
-
-    # Get LakeFS client with proper exception handling
-    try:
-        lakefs_client = lakefs.get_client()
-    except LakeFSConnectionError as e:
-        raise RuntimeError(
-            f"Cannot connect to LakeFS to store speeches data product. "
-            f"Ensure LakeFS is running and accessible. Details: {e}"
-        ) from e
-
-    # Upload to LakeFS - use trial path if is_trial
-    if config.is_trial:
-        path = "central-bank-speeches/trial/speeches.parquet"
-        context.log.info("TRIAL RUN: Using trial-specific LakeFS path")
-    else:
-        path = "central-bank-speeches/speeches.parquet"
-
-    try:
-        lakefs_client.objects_api.upload_object(
-            repository="data",
-            branch="main",
-            path=path,
-            content=parquet_bytes,
-        )
-    except LakeFSError as e:
-        raise RuntimeError(f"Failed to upload speeches data product to LakeFS: {e}") from e
-
-    # Create commit (skip if no changes)
-    # Note: Direct SDK calls raise standard exceptions, not LakeFSError
+    # Compute statistics
     tariff_count = df.filter(pl.col("tariff_mention") == 1).height
-    commit_id = None
-    try:
-        commit = lakefs_client.commits_api.commit(
-            repository="data",
-            branch="main",
-            commit_creation=CommitCreation(
-                message=f"Update central bank speeches data product ({len(df)} records)",
-                metadata={
-                    "dagster_run_id": context.run_id or "",
-                    "num_records": str(len(df)),
-                    "tariff_mentions": str(tariff_count),
-                },
-                date=None,
-                allow_empty=False,
-            ),
-        )
-        commit_id = commit.id
-        context.log.info(f"Committed to LakeFS: {commit_id}")
-    except Exception as e:
-        if "no changes" in str(e).lower():
-            context.log.info("No changes to commit (data already exists in LakeFS)")
-        else:
-            raise
+    governor_count = df.filter(pl.col("is_gov") == 1).height
+
+    context.log.info(f"Data product: {len(df)} speeches")
+    context.log.info(f"Tariff mentions: {tariff_count}")
+    context.log.info(f"Governor speeches: {governor_count}")
+
+    # Add output metadata for Dagster UI
+    context.add_output_metadata(
+        {
+            "num_records": len(df),
+            "tariff_mentions": tariff_count,
+            "governor_speeches": governor_count,
+        }
+    )
 
     return {
-        "path": f"lakefs://data/main/{path}",
-        "commit_id": commit_id,
         "num_records": len(df),
         "tariff_mentions": tariff_count,
+        "governor_speeches": governor_count,
     }
 
 
@@ -1319,373 +1193,6 @@ def weaviate_index(
 
 # ============================================================================
 # INTERMEDIATE SNAPSHOTS - Persist intermediate stages to LakeFS
-# ============================================================================
-
-
-@dg.asset(
-    description="Snapshot of classification results in LakeFS",
-    group_name="central_bank_speeches",
-    metadata={
-        "layer": "intermediate",
-        "destination": "lakefs",
-    },
-)
-def classification_snapshot(
-    context: dg.AssetExecutionContext,
-    config: PipelineConfig,
-    speech_classification: pl.DataFrame,
-    lakefs: LakeFSResource,
-) -> dict[str, Any]:
-    """Persist classification results to LakeFS for debugging and recovery.
-
-    Stores the multi-dimensional classification output (monetary stance,
-    trade stance, tariff mention, economic outlook) as a versioned snapshot.
-
-    Args:
-        context: Dagster execution context for logging.
-        config: Pipeline configuration (is_trial for path selection).
-        speech_classification: DataFrame with classification columns.
-        lakefs: LakeFS resource for data versioning.
-
-    Returns:
-        Dictionary with storage metadata.
-    """
-    from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
-
-    df = speech_classification
-
-    # Select classification columns including dead letter tracking
-    classification_cols = [
-        "reference",
-        "monetary_stance",
-        "trade_stance",
-        "tariff_mention",
-        "economic_outlook",
-        "_llm_status",
-        "_llm_error",
-        "_llm_attempts",
-        "_llm_fallback_used",
-    ]
-    df_snapshot = df.select([c for c in classification_cols if c in df.columns])
-
-    # Serialize to Parquet
-    buffer = io.BytesIO()
-    df_snapshot.write_parquet(buffer)
-    parquet_bytes = buffer.getvalue()
-
-    # Get LakeFS client with proper exception handling
-    try:
-        lakefs_client = lakefs.get_client()
-    except LakeFSConnectionError as e:
-        raise RuntimeError(
-            f"Cannot connect to LakeFS to store classification snapshot. "
-            f"Ensure LakeFS is running and accessible. Details: {e}"
-        ) from e
-
-    # Upload to LakeFS intermediate path
-    if config.is_trial:
-        path = "central-bank-speeches/trial/intermediate/classifications.parquet"
-    else:
-        path = "central-bank-speeches/intermediate/classifications.parquet"
-
-    try:
-        lakefs_client.objects_api.upload_object(
-            repository="data",
-            branch="main",
-            path=path,
-            content=parquet_bytes,
-        )
-    except LakeFSError as e:
-        raise RuntimeError(f"Failed to upload classification snapshot to LakeFS: {e}") from e
-
-    # Create commit
-    # Note: Direct SDK calls raise standard exceptions, not LakeFSError
-    commit_id = None
-    try:
-        tariff_count = df_snapshot.filter(pl.col("tariff_mention") == 1).height
-        commit = lakefs_client.commits_api.commit(
-            repository="data",
-            branch="main",
-            commit_creation=CommitCreation(
-                message=f"Snapshot: classifications ({len(df_snapshot)} records)",
-                metadata={
-                    "dagster_run_id": context.run_id or "",
-                    "snapshot_type": "classification",
-                    "num_records": str(len(df_snapshot)),
-                    "tariff_mentions": str(tariff_count),
-                },
-                date=None,
-                allow_empty=False,
-            ),
-        )
-        commit_id = commit.id
-        context.log.info(f"Classification snapshot committed: {commit_id}")
-    except Exception as e:
-        if "no changes" in str(e).lower():
-            context.log.info("No changes to commit (snapshot already exists)")
-        else:
-            raise
-
-    # Log distribution stats
-    context.log.info(f"Classification snapshot: {len(df_snapshot)} records")
-    context.log.info(
-        f"Monetary stance distribution: {df_snapshot['monetary_stance'].value_counts().sort('monetary_stance')}"
-    )
-
-    return {
-        "path": f"lakefs://data/main/{path}",
-        "commit_id": commit_id,
-        "num_records": len(df_snapshot),
-    }
-
-
-@dg.asset(
-    description="Snapshot of summaries in LakeFS",
-    group_name="central_bank_speeches",
-    metadata={
-        "layer": "intermediate",
-        "destination": "lakefs",
-    },
-)
-def summaries_snapshot(
-    context: dg.AssetExecutionContext,
-    config: PipelineConfig,
-    speech_summaries: pl.DataFrame,
-    lakefs: LakeFSResource,
-    classification_snapshot: dict[str, Any],  # Dependency to prevent concurrent commits
-) -> dict[str, Any]:
-    """Persist summary results to LakeFS for debugging and recovery.
-
-    Stores the GPT-OSS generated summaries as a versioned snapshot.
-    These summaries capture semantic nuance beyond numeric classifications.
-
-    Depends on classification_snapshot to ensure sequential LakeFS commits
-    (prevents "predicate failed" errors from concurrent commits).
-
-    Args:
-        context: Dagster execution context for logging.
-        config: Pipeline configuration (is_trial for path selection).
-        speech_summaries: DataFrame with summary column.
-        lakefs: LakeFS resource for data versioning.
-        classification_snapshot: Previous snapshot (unused, forces sequential execution).
-
-    Returns:
-        Dictionary with storage metadata.
-    """
-    del classification_snapshot  # Unused, exists only to enforce dependency
-    from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
-
-    df = speech_summaries
-
-    # Select summary columns including dead letter tracking
-    summary_cols = [
-        "reference",
-        "summary",
-        "_llm_status",
-        "_llm_error",
-        "_llm_attempts",
-        "_llm_fallback_used",
-    ]
-    df_snapshot = df.select([c for c in summary_cols if c in df.columns])
-
-    # Serialize to Parquet
-    buffer = io.BytesIO()
-    df_snapshot.write_parquet(buffer)
-    parquet_bytes = buffer.getvalue()
-
-    # Get LakeFS client with proper exception handling
-    try:
-        lakefs_client = lakefs.get_client()
-    except LakeFSConnectionError as e:
-        raise RuntimeError(
-            f"Cannot connect to LakeFS to store summaries snapshot. "
-            f"Ensure LakeFS is running and accessible. Details: {e}"
-        ) from e
-
-    # Upload to LakeFS intermediate path
-    if config.is_trial:
-        path = "central-bank-speeches/trial/intermediate/summaries.parquet"
-    else:
-        path = "central-bank-speeches/intermediate/summaries.parquet"
-
-    try:
-        lakefs_client.objects_api.upload_object(
-            repository="data",
-            branch="main",
-            path=path,
-            content=parquet_bytes,
-        )
-    except LakeFSError as e:
-        raise RuntimeError(f"Failed to upload summaries snapshot to LakeFS: {e}") from e
-
-    # Create commit
-    # Note: Direct SDK calls raise standard exceptions, not LakeFSError
-    commit_id = None
-    try:
-        commit = lakefs_client.commits_api.commit(
-            repository="data",
-            branch="main",
-            commit_creation=CommitCreation(
-                message=f"Snapshot: summaries ({len(df_snapshot)} records)",
-                metadata={
-                    "dagster_run_id": context.run_id or "",
-                    "snapshot_type": "summaries",
-                    "num_records": str(len(df_snapshot)),
-                },
-                date=None,
-                allow_empty=False,
-            ),
-        )
-        commit_id = commit.id
-        context.log.info(f"Summaries snapshot committed: {commit_id}")
-    except Exception as e:
-        if "no changes" in str(e).lower():
-            context.log.info("No changes to commit (snapshot already exists)")
-        else:
-            raise
-
-    # Log stats
-    non_null_summaries = df_snapshot.filter(pl.col("summary").is_not_null()).height
-    context.log.info(
-        f"Summaries snapshot: {non_null_summaries}/{len(df_snapshot)} records with summaries"
-    )
-
-    # Sample summary lengths
-    summary_lengths = df_snapshot.select(pl.col("summary").str.len_chars().alias("len"))
-    mean_value = summary_lengths["len"].mean()
-    # Cast to float - polars mean returns complex union but we know it's numeric
-    avg_len = float(mean_value) if isinstance(mean_value, (int, float)) else 0.0
-    context.log.info(f"Average summary length: {avg_len:.0f} chars")
-
-    return {
-        "path": f"lakefs://data/main/{path}",
-        "commit_id": commit_id,
-        "num_records": len(df_snapshot),
-        "summaries_with_content": non_null_summaries,
-    }
-
-
-@dg.asset(
-    description="Snapshot of embeddings metadata in LakeFS",
-    group_name="central_bank_speeches",
-    metadata={
-        "layer": "intermediate",
-        "destination": "lakefs",
-    },
-)
-def embeddings_snapshot(
-    context: dg.AssetExecutionContext,
-    config: PipelineConfig,
-    speech_embeddings: tuple[pl.DataFrame, list[list[float]]],
-    lakefs: LakeFSResource,
-    summaries_snapshot: dict[str, Any],  # Dependency to prevent concurrent commits
-) -> dict[str, Any]:
-    """Persist embeddings to LakeFS for debugging and recovery.
-
-    Stores the embedding vectors alongside their references. Note that
-    embeddings are large (1024 floats per record), so this is primarily
-    for recovery/debugging rather than routine access.
-
-    Depends on summaries_snapshot to ensure sequential LakeFS commits
-    (prevents "predicate failed" errors from concurrent commits).
-
-    Args:
-        context: Dagster execution context for logging.
-        config: Pipeline configuration (is_trial for path selection).
-        speech_embeddings: Tuple of (DataFrame, embeddings list).
-        lakefs: LakeFS resource for data versioning.
-        summaries_snapshot: Previous snapshot (unused, forces sequential execution).
-
-    Returns:
-        Dictionary with storage metadata.
-    """
-    del summaries_snapshot  # Unused, exists only to enforce dependency
-    from lakefs_sdk.models import CommitCreation  # type: ignore[attr-defined]
-
-    df, embeddings = speech_embeddings
-
-    # Create DataFrame with embeddings
-    embedding_records: list[dict[str, object]] = []
-    for i, row in enumerate(df.iter_rows(named=True)):
-        embedding_records.append(
-            {
-                "reference": row["reference"],
-                "embedding": embeddings[i],
-            }
-        )
-    df_snapshot = pl.DataFrame(embedding_records)
-
-    # Serialize to Parquet
-    buffer = io.BytesIO()
-    df_snapshot.write_parquet(buffer)
-    parquet_bytes = buffer.getvalue()
-
-    # Get LakeFS client with proper exception handling
-    try:
-        lakefs_client = lakefs.get_client()
-    except LakeFSConnectionError as e:
-        raise RuntimeError(
-            f"Cannot connect to LakeFS to store embeddings snapshot. "
-            f"Ensure LakeFS is running and accessible. Details: {e}"
-        ) from e
-
-    # Upload to LakeFS intermediate path
-    if config.is_trial:
-        path = "central-bank-speeches/trial/intermediate/embeddings.parquet"
-    else:
-        path = "central-bank-speeches/intermediate/embeddings.parquet"
-
-    try:
-        lakefs_client.objects_api.upload_object(
-            repository="data",
-            branch="main",
-            path=path,
-            content=parquet_bytes,
-        )
-    except LakeFSError as e:
-        raise RuntimeError(f"Failed to upload embeddings snapshot to LakeFS: {e}") from e
-
-    # Create commit
-    # Note: Direct SDK calls raise standard exceptions, not LakeFSError
-    commit_id = None
-    try:
-        commit = lakefs_client.commits_api.commit(
-            repository="data",
-            branch="main",
-            commit_creation=CommitCreation(
-                message=f"Snapshot: embeddings ({len(df_snapshot)} records, {len(embeddings[0])}d)",
-                metadata={
-                    "dagster_run_id": context.run_id or "",
-                    "snapshot_type": "embeddings",
-                    "num_records": str(len(df_snapshot)),
-                    "dimensions": str(len(embeddings[0])),
-                },
-                date=None,
-                allow_empty=False,
-            ),
-        )
-        commit_id = commit.id
-        context.log.info(f"Embeddings snapshot committed: {commit_id}")
-    except Exception as e:
-        if "no changes" in str(e).lower():
-            context.log.info("No changes to commit (snapshot already exists)")
-        else:
-            raise
-
-    context.log.info(
-        f"Embeddings snapshot: {len(df_snapshot)} vectors, {len(embeddings[0])} dimensions"
-    )
-    context.log.info(f"Snapshot size: {len(parquet_bytes) / 1024 / 1024:.1f} MB")
-
-    return {
-        "path": f"lakefs://data/main/{path}",
-        "commit_id": commit_id,
-        "num_records": len(df_snapshot),
-        "dimensions": len(embeddings[0]),
-        "size_mb": len(parquet_bytes) / 1024 / 1024,
-    }
-
-
 # Export all central bank speech assets
 central_bank_speeches_assets = [
     raw_speeches,
@@ -1696,8 +1203,4 @@ central_bank_speeches_assets = [
     enriched_speeches,
     speeches_data_product,
     weaviate_index,
-    # Intermediate snapshots for debugging/recovery
-    classification_snapshot,
-    summaries_snapshot,
-    embeddings_snapshot,
 ]

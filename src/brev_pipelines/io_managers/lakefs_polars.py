@@ -25,6 +25,7 @@ class LakeFSPolarsIOManager(ConfigurableIOManager):
     - Parquet serialization/deserialization
     - LakeFS branch management
     - Commit creation with metadata
+    - Trial/production path separation
 
     Attributes:
         lakefs: LakeFS resource for versioning operations.
@@ -32,6 +33,7 @@ class LakeFSPolarsIOManager(ConfigurableIOManager):
         repository: LakeFS repository name.
         branch: LakeFS branch name.
         base_path: Base path in repository for data products.
+        is_trial: If True, writes to trial/ subdirectory.
     """
 
     lakefs: LakeFSResource = Field(description="LakeFS resource")
@@ -39,8 +41,22 @@ class LakeFSPolarsIOManager(ConfigurableIOManager):
     repository: str = Field(default="data", description="LakeFS repository name")
     branch: str = Field(default="main", description="LakeFS branch name")
     base_path: str = Field(default="data-products", description="Base path in repository")
+    is_trial: bool = Field(default=False, description="If True, write to trial/ subdirectory")
 
-    def handle_output(self, context: OutputContext, obj: pl.DataFrame) -> None:
+    def _get_path(self, asset_key: str) -> str:
+        """Generate storage path for an asset.
+
+        Args:
+            asset_key: The asset key/name.
+
+        Returns:
+            Full path including trial prefix if is_trial is True.
+        """
+        if self.is_trial:
+            return f"{self.base_path}/trial/{asset_key}.parquet"
+        return f"{self.base_path}/{asset_key}.parquet"
+
+    def handle_output(self, context: OutputContext, obj: pl.DataFrame | None) -> None:
         """Store a Polars DataFrame to LakeFS as Parquet.
 
         Args:
@@ -53,7 +69,7 @@ class LakeFSPolarsIOManager(ConfigurableIOManager):
 
         # Determine output path from asset key
         asset_key = context.asset_key.path[-1] if context.asset_key else "output"
-        path = f"{self.base_path}/{asset_key}.parquet"
+        path = self._get_path(asset_key)
 
         # Serialize DataFrame to Parquet bytes
         buffer = io.BytesIO()
@@ -113,7 +129,7 @@ class LakeFSPolarsIOManager(ConfigurableIOManager):
         """
         # Determine input path from asset key
         asset_key = context.asset_key.path[-1] if context.asset_key else "input"
-        path = f"{self.base_path}/{asset_key}.parquet"
+        path = self._get_path(asset_key)
 
         # Get LakeFS client
         lakefs_client = self.lakefs.get_client()

@@ -832,10 +832,21 @@ class TestSpeechEmbeddings:
         )
         return resource
 
+    @pytest.fixture
+    def sample_summaries_df(self) -> pl.DataFrame:
+        """Create sample summaries for embedding."""
+        return pl.DataFrame(
+            {
+                "reference": ["BIS_001", "BIS_002"],
+                "summary": ["• Key point 1\n• Key point 2", "• Summary bullet"],
+            }
+        )
+
     def test_generates_embeddings_for_all_rows(
         self,
         asset_context: AssetExecutionContext,
         sample_cleaned_df: pl.DataFrame,
+        sample_summaries_df: pl.DataFrame,
         mock_nim_embedding: MagicMock,
         mock_minio_for_checkpoint: MagicMock,
         mock_k8s_scaler: MagicMock,
@@ -866,6 +877,7 @@ class TestSpeechEmbeddings:
             df, embeddings = speech_embeddings(
                 asset_context,
                 sample_cleaned_df,
+                sample_summaries_df,
                 mock_nim_embedding,
                 mock_minio_for_checkpoint,
                 mock_k8s_scaler,

@@ -656,50 +656,30 @@ size {file_size}
         # Upload data to NDS
         data_source = self._upload_to_nds(data, run_id)
 
-        # Build Safe Synthesizer job config with memory-optimized settings
-        # Lower max_vram_fraction leaves room for evaluation models (sentence_transformers)
+        # Build Safe Synthesizer job config - use defaults like the notebook example
+        # See: https://docs.nvidia.com/nemo/microservices/latest/generate-private-synthetic-data/tutorials/safe-synthesizer-101.html
         synth_config: dict[str, Any] = {
             "enable_synthesis": True,
             "enable_replace_pii": config.get("piiReplacement", True) if config else True,
-            "data": {
-                "holdout": 0.05,
-                "max_holdout": min(len(data) // 10, 2000),
-            },
             "evaluation": {
-                "mia_enabled": config.get("runMiaEvaluation", True) if config else True,
-                "aia_enabled": config.get("runAiaEvaluation", True) if config else True,
                 "enabled": True,
-                # Reduce evaluation rows to prevent CUDA OOM
-                "sqs_report_rows": 1000,
             },
             "training": {
-                "pretrained_model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-                # RoPE scaling extends context from 2K to ~12K tokens (factor 6 = max)
-                # Allows longer text fields (~10K chars) at cost of increased runtime
+                # RoPE scaling for longer text fields (summaries ~1200 chars)
                 "rope_scaling_factor": 6,
-                # Use more training samples to prevent underfitting
-                "num_input_records_to_sample": min(len(data), 5000),
-                # Memory optimization: leave 40% VRAM for evaluation
-                "max_vram_fraction": 0.6,
-                "batch_size": 1,
-                "gradient_accumulation_steps": 8,
             },
             "generation": {
                 "num_records": len(data),
-                # Lower temperature for more deterministic (valid JSON) output
-                "temperature": config.get("temperature", 0.5) if config else 0.5,
-                # Increase patience to allow more retry attempts
-                "patience": 5,
-                "invalid_fraction_threshold": 0.9,
-                # Disable structured generation for performance
-                # The regex-based constrained decoding causes 0% GPU utilization
-                # and ~0.1 rec/s. Disabling gives 10-100x speedup with ~30-40%
-                # invalid records that get filtered out during validation.
-                "use_structured_generation": False,
+                # Use JSON schema method instead of regex for structured generation
+                # Regex causes XGrammar -> Outlines fallback (CPU-bound, 0.1 rec/s)
+                # JSON schema uses native XGrammar (GPU-accelerated, 5x+ faster)
+                "use_structured_generation": True,
+                "structured_generation_schema_method": "json",
             },
         }
 
-        # Add differential privacy if epsilon is specified
+        # Add differential privacy only if explicitly requested
+        # DP adds noise that can cause underfitting - use higher epsilon (8-12) if needed
         epsilon = config.get("epsilon") if config else None
         if epsilon is not None:
             synth_config["privacy"] = {

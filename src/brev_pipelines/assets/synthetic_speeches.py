@@ -372,20 +372,15 @@ def synthetic_summaries(
     )
 
     # Build Safe Synthesizer config based on dataset size
-    # Per documentation: holdout requires 200+ records, recommended to disable for <500
+    # Simplified config - use defaults like the NVIDIA notebook example
+    # See: https://docs.nvidia.com/nemo/microservices/latest/generate-private-synthetic-data/tutorials/safe-synthesizer-101.html
     num_records = len(data_for_synthesis)
     synth_config: SafeSynthConfig = {
-        "epsilon": 6.0,  # Recommended 4-12 for large datasets
+        # No epsilon = no differential privacy (like the notebook example)
+        # DP with low epsilon (6.0) caused underfitting - model couldn't learn JSON format
         "piiReplacement": True,
         "runMiaEvaluation": True,
         "runAiaEvaluation": True,
-        "training": {
-            "rope_scaling_factor": 4,  # Extend context window for ~1000 char summaries
-        },
-        "generation": {
-            "temperature": 0.9,  # Safe Synthesizer default for diversity
-            "use_structured_generation": True,  # Better tabular output quality
-        },
     }
 
     # Disable holdout for small datasets to avoid "Dataset must have at least 200 records" error
@@ -452,10 +447,9 @@ def synthetic_summaries(
         "includes_summary": "summary" in available_columns,
         # Config parameters for traceability
         "config": {
-            "epsilon": synth_config["epsilon"],
-            "rope_scaling_factor": synth_config["training"]["rope_scaling_factor"],
-            "temperature": synth_config["generation"]["temperature"],
-            "use_structured_generation": synth_config["generation"]["use_structured_generation"],
+            "dp_enabled": "epsilon" in synth_config,
+            "epsilon": synth_config.get("epsilon"),
+            "structured_generation_schema_method": "json",
             "holdout_disabled": num_records < 500,
         },
     }

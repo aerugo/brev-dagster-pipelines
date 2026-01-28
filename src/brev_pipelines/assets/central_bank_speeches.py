@@ -312,120 +312,107 @@ def speech_embeddings(
         return (df, embeddings)
 
     # Production mode: use checkpointing for recovery
-    # Scale down nim-reasoning to free GPU for embedding model
+    # Scale nim-reasoning to 0 (its default) to free GPU for embedding model.
+    # Don't use temporarily_scale — nim-reasoning defaults to 0 replicas and
+    # will be scaled up on demand by _ensure_nim_reasoning_ready in the next job.
     context.log.info("Production mode: scaling down nim-reasoning for embedding")
-
-    with k8s_scaler.temporarily_scale(
+    k8s_scaler.scale(
         deployment="nim-reasoning",
         namespace="nvidia-ai",
         replicas=0,
-        restore_wait_ready=True,  # Wait for nim-reasoning to be ready before classification
-    ):
-        context.log.info("nim-reasoning scaled down, starting embedding generation")
+        wait_ready=False,
+    )
+    # Restore safe-synth now that nim-reasoning is down
+    context.log.info("Restoring safe-synth after nim-reasoning scale-down")
+    k8s_scaler.scale(
+        deployment="nvidia-safe-synth-safe-synthesizer",
+        namespace="nvidia-ai",
+        replicas=1,
+        wait_ready=False,
+    )
+    context.log.info("nim-reasoning scaled down, starting embedding generation")
 
-        checkpoint_mgr = LLMCheckpointManager(
-            minio=minio,
-            asset_name="speech_embeddings",
-            run_id=context.run_id,
-            checkpoint_interval=32,  # Match embedding batch size
-        )
+    checkpoint_mgr = LLMCheckpointManager(
+        minio=minio,
+        asset_name="speech_embeddings",
+        run_id=context.run_id,
+        checkpoint_interval=32,
+    )
 
-        # Load existing checkpoint
-        existing_checkpoint = checkpoint_mgr.load()
-        processed_refs: set[str] = set()
-        if existing_checkpoint is not None:
-            processed_refs = set(existing_checkpoint["reference"].to_list())
-            context.log.info(f"Loaded checkpoint with {len(processed_refs)} embeddings")
+    existing_checkpoint = checkpoint_mgr.load()
+    processed_refs: set[str] = set()
+    if existing_checkpoint is not None:
+        processed_refs = set(existing_checkpoint["reference"].to_list())
+        context.log.info(f"Loaded checkpoint with {len(processed_refs)} embeddings")
 
-        # Filter to unprocessed rows
-        to_process = df.filter(~pl.col("reference").is_in(list(processed_refs)))
-        context.log.info(
-            f"Processing {len(to_process)} remaining rows (skipping {len(processed_refs)} already done)"
-        )
+    to_process = df.filter(~pl.col("reference").is_in(list(processed_refs)))
+    context.log.info(
+        f"Processing {len(to_process)} remaining rows (skipping {len(processed_refs)} already done)"
+    )
 
-        # Process in batches with checkpointing
-        batch_size = 32
-        rows = to_process.to_dicts()
-        total_batches = (len(rows) + batch_size - 1) // batch_size
-        log_interval = max(1, total_batches // 10)  # Log ~10 times during processing
+    batch_size = 32
+    rows = to_process.to_dicts()
+    total_batches = (len(rows) + batch_size - 1) // batch_size
+    log_interval = max(1, total_batches // 10)
 
-        for batch_num, i in enumerate(range(0, len(rows), batch_size)):
-            batch = rows[i : i + batch_size]
+    for batch_num, i in enumerate(range(0, len(rows), batch_size)):
+        batch = rows[i : i + batch_size]
 
-            # Prepare texts for this batch using summaries (truncated to fit 512 token limit)
-            texts = []
-            for row in batch:
-                title = row.get("title", "") or ""
-                summary = row.get("summary", "") or ""
-                # Use summary if available, fallback to title
-                combined = f"{title}\n\n{summary}" if summary else title or "Untitled speech"
-                # Sanitize: remove null bytes, control chars
-                combined = combined.replace("\x00", "").strip()
-                combined = "".join(c if c.isprintable() or c in "\n\t" else " " for c in combined)
-                # Truncate to ~1500 chars to stay within 512 token limit
-                combined = combined[:1500]
-                # Ensure non-empty (embedding models reject empty strings)
-                if not combined or len(combined) < 10:
-                    combined = f"Speech: {title or 'Untitled'}"
-                texts.append(combined)
+        texts = []
+        for row in batch:
+            title = row.get("title", "") or ""
+            summary = row.get("summary", "") or ""
+            combined = f"{title}\n\n{summary}" if summary else title or "Untitled speech"
+            combined = combined.replace("\x00", "").strip()
+            combined = "".join(c if c.isprintable() or c in "\n\t" else " " for c in combined)
+            combined = combined[:1500]
+            if not combined or len(combined) < 10:
+                combined = f"Speech: {title or 'Untitled'}"
+            texts.append(combined)
 
-            # Generate embeddings for batch with error handling
-            try:
-                batch_embeddings = nim_embedding.embed_texts(texts, batch_size=batch_size)
-            except Exception as e:
-                # Log the failing batch for debugging
-                context.log.error(f"Embedding batch {batch_num} failed: {e}")
-                context.log.error(f"First text in batch (truncated): {texts[0][:200]}")
-                raise
+        try:
+            batch_embeddings = nim_embedding.embed_texts(texts, batch_size=batch_size)
+        except Exception as e:
+            context.log.error(f"Embedding batch {batch_num} failed: {e}")
+            context.log.error(f"First text in batch (truncated): {texts[0][:200]}")
+            raise
 
-            # Save to checkpoint
-            for j, row in enumerate(batch):
-                checkpoint_mgr.save_batch(
-                    [
-                        {
-                            "reference": row["reference"],
-                            "embedding": batch_embeddings[j],
-                        }
-                    ],
-                    force=(j == len(batch) - 1),
-                )  # Force save at end of batch
+        for j, row in enumerate(batch):
+            checkpoint_mgr.save_batch(
+                [{"reference": row["reference"], "embedding": batch_embeddings[j]}],
+                force=(j == len(batch) - 1),
+            )
 
-            # Log progress at intervals
-            if batch_num % log_interval == 0 or batch_num == total_batches - 1:
-                context.log.info(
-                    f"Embedding progress: {checkpoint_mgr.processed_count}/{len(rows)} complete"
-                )
+        if batch_num % log_interval == 0 or batch_num == total_batches - 1:
+            context.log.info(
+                f"Embedding progress: {checkpoint_mgr.processed_count}/{len(rows)} complete"
+            )
 
-        # Finalize and get all results
-        final_checkpoint = checkpoint_mgr.finalize()
+    final_checkpoint = checkpoint_mgr.finalize()
+    checkpoint_mgr.cleanup()
 
-        # Clean up checkpoint on success
-        checkpoint_mgr.cleanup()
+    embedding_map: dict[str, list[float]] = {}
+    if final_checkpoint is not None:
+        for row in final_checkpoint.to_dicts():
+            embedding_map[row["reference"]] = row["embedding"]
 
-        # Build embeddings list in DataFrame order
-        embedding_map: dict[str, list[float]] = {}
-        if final_checkpoint is not None:
-            for row in final_checkpoint.to_dicts():
-                embedding_map[row["reference"]] = row["embedding"]
-
-        embeddings: list[list[float]] = []
-        for row in df.iter_rows(named=True):
-            ref = row["reference"]
-            if ref in embedding_map:
-                embeddings.append(embedding_map[ref])
+    embeddings: list[list[float]] = []
+    for row in df.iter_rows(named=True):
+        ref = row["reference"]
+        if ref in embedding_map:
+            embeddings.append(embedding_map[ref])
+        else:
+            title = row.get("title", "") or ""
+            summary = row.get("summary", "") or ""
+            if summary:
+                combined = f"{title}\n\n{summary}"[:1500]
             else:
-                # This shouldn't happen, but fallback to generating from summary
-                title = row.get("title", "") or ""
-                summary = row.get("summary", "") or ""
-                if summary:
-                    combined = f"{title}\n\n{summary}"[:1500]
-                else:
-                    combined = title[:1500] or "Untitled speech"
-                embeddings.append(nim_embedding.embed_text(combined))
+                combined = title[:1500] or "Untitled speech"
+            embeddings.append(nim_embedding.embed_text(combined))
 
-        context.log.info(f"Generated {len(embeddings)} embeddings, dimension: {len(embeddings[0])}")
+    context.log.info(f"Generated {len(embeddings)} embeddings, dimension: {len(embeddings[0])}")
 
-        return (df, embeddings)
+    return (df, embeddings)
 
 
 # Classification scale mappings

@@ -17,8 +17,8 @@ Usage:
     trial_assets = build_cbs_assets(is_trial=True)
 """
 
-from datetime import UTC, datetime
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 import dagster as dg

@@ -34,13 +34,13 @@ import polars as pl
 
 from brev_pipelines.config import PipelineConfig
 from brev_pipelines.io_managers.checkpoint import LLMCheckpointManager
+from brev_pipelines.resources.k8s_scaler import K8sScalerResource
 from brev_pipelines.resources.lakefs import (
     LakeFSConnectionError,
     LakeFSError,
     LakeFSNotFoundError,
     LakeFSResource,
 )
-from brev_pipelines.resources.k8s_scaler import K8sScalerResource
 from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.nim_embedding import NIMEmbeddingResource
 from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
@@ -313,6 +313,7 @@ def synthetic_summaries(
         context: Dagster execution context for logging.
         enriched_data_for_synthesis: Enriched speeches from LakeFS (with classifications).
         safe_synth: Safe Synthesizer resource for privacy-preserving synthesis.
+        k8s_scaler: Kubernetes scaler to ensure NIM is running for PII classification.
 
     Returns:
         Tuple of (synthetic metadata+summary DataFrame, evaluation report).

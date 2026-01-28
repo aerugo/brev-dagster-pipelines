@@ -111,7 +111,7 @@ defs = Definitions(
                 "NDS_ENDPOINT",
                 "http://nemo-data-store.nvidia-ai.svc.cluster.local:3000",
             ),
-            nds_token=_env("NDS_TOKEN", ""),
+            nds_token=EnvVar("NDS_TOKEN"),
             nds_repo=_env("NDS_REPO", "default/central-bank-speeches"),
             priority_class=_env("SAFE_SYNTH_PRIORITY", "batch-high"),
             use_mock_fallback=_use_mock_fallback,

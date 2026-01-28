@@ -197,11 +197,18 @@ class TestSyntheticSummaries:
             }
         )
 
+
+    @pytest.fixture
+    def mock_k8s_scaler(self) -> MagicMock:
+        """Create mock K8s scaler resource."""
+        return MagicMock()
+
     def test_calls_safe_synth(
         self,
         asset_context: AssetExecutionContext,
         sample_enriched_df: pl.DataFrame,
         mock_safe_synth_resource: MagicMock,
+        mock_k8s_scaler: MagicMock,
     ) -> None:
         """Test synthetic_summaries calls Safe Synthesizer."""
         mock_safe_synth_resource.synthesize.return_value = (
@@ -213,6 +220,7 @@ class TestSyntheticSummaries:
             asset_context,
             sample_enriched_df,
             mock_safe_synth_resource,
+            mock_k8s_scaler,
         )
 
         mock_safe_synth_resource.synthesize.assert_called_once()
@@ -222,6 +230,7 @@ class TestSyntheticSummaries:
         asset_context: AssetExecutionContext,
         sample_enriched_df: pl.DataFrame,
         mock_safe_synth_resource: MagicMock,
+        mock_k8s_scaler: MagicMock,
     ) -> None:
         """Test synthetic_summaries generates SYNTH-XXXXXX IDs."""
         mock_safe_synth_resource.synthesize.return_value = (
@@ -233,6 +242,7 @@ class TestSyntheticSummaries:
             asset_context,
             sample_enriched_df,
             mock_safe_synth_resource,
+            mock_k8s_scaler,
         )
 
         # All references should be SYNTH-XXXXXX format
@@ -243,6 +253,7 @@ class TestSyntheticSummaries:
         asset_context: AssetExecutionContext,
         sample_enriched_df: pl.DataFrame,
         mock_safe_synth_resource: MagicMock,
+        mock_k8s_scaler: MagicMock,
     ) -> None:
         """Test synthetic_summaries adds is_synthetic=True flag."""
         mock_safe_synth_resource.synthesize.return_value = (
@@ -254,6 +265,7 @@ class TestSyntheticSummaries:
             asset_context,
             sample_enriched_df,
             mock_safe_synth_resource,
+            mock_k8s_scaler,
         )
 
         assert "is_synthetic" in df.columns
@@ -264,6 +276,7 @@ class TestSyntheticSummaries:
         asset_context: AssetExecutionContext,
         sample_enriched_df: pl.DataFrame,
         mock_safe_synth_resource: MagicMock,
+        mock_k8s_scaler: MagicMock,
     ) -> None:
         """Test synthetic_summaries returns evaluation metadata."""
         mock_safe_synth_resource.synthesize.return_value = (
@@ -275,6 +288,7 @@ class TestSyntheticSummaries:
             asset_context,
             sample_enriched_df,
             mock_safe_synth_resource,
+            mock_k8s_scaler,
         )
 
         assert "total_records" in evaluation
@@ -288,6 +302,7 @@ class TestSyntheticSummaries:
         self,
         asset_context: AssetExecutionContext,
         mock_safe_synth_resource: MagicMock,
+        mock_k8s_scaler: MagicMock,
     ) -> None:
         """Test synthetic_summaries disables holdout for <500 records."""
         # Small dataset (< 500)
@@ -316,6 +331,7 @@ class TestSyntheticSummaries:
             asset_context,
             small_df,
             mock_safe_synth_resource,
+            mock_k8s_scaler,
         )
 
         # Check config passed to synthesize

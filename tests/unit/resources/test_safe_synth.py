@@ -108,6 +108,7 @@ class TestK8sClientCreation:
         assert hasattr(client, "list_namespaced_pod")
         assert hasattr(client, "read_namespaced_pod_log")
 
+
 class TestCreateSynthesisJob:
     """Tests for Kubernetes job creation."""
 

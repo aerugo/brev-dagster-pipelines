@@ -635,12 +635,21 @@ class TestSpeechClassification:
         )
         return resource
 
+    @pytest.fixture
+    def mock_k8s_scaler(self) -> MagicMock:
+        """Create mock K8s scaler resource."""
+        resource = MagicMock()
+        resource.get_replicas = MagicMock(return_value=1)  # NIM already running
+        resource.scale = MagicMock()
+        return resource
+
     def test_classifies_speeches(
         self,
         asset_context: AssetExecutionContext,
         sample_cleaned_df: pl.DataFrame,
         mock_nim_reasoning: MagicMock,
         mock_minio_for_checkpoint: MagicMock,
+        mock_k8s_scaler: MagicMock,
     ) -> None:
         """Test speech_classification classifies all speeches."""
         # Create expected results DataFrame with dead letter columns
@@ -673,6 +682,7 @@ class TestSpeechClassification:
                 sample_cleaned_df,
                 mock_nim_reasoning,
                 mock_minio_for_checkpoint,
+                mock_k8s_scaler,
             )
 
         assert "monetary_stance" in df.columns
@@ -719,12 +729,21 @@ class TestSpeechSummaries:
         )
         return resource
 
+    @pytest.fixture
+    def mock_k8s_scaler(self) -> MagicMock:
+        """Create mock K8s scaler resource."""
+        resource = MagicMock()
+        resource.get_replicas = MagicMock(return_value=1)  # NIM already running
+        resource.scale = MagicMock()
+        return resource
+
     def test_generates_summaries(
         self,
         asset_context: AssetExecutionContext,
         sample_cleaned_df: pl.DataFrame,
         mock_nim_reasoning: MagicMock,
         mock_minio_for_checkpoint: MagicMock,
+        mock_k8s_scaler: MagicMock,
     ) -> None:
         """Test speech_summaries generates summaries for all speeches."""
         # Create expected results DataFrame with dead letter columns
@@ -757,6 +776,7 @@ class TestSpeechSummaries:
                 sample_cleaned_df,
                 mock_nim_reasoning,
                 mock_minio_for_checkpoint,
+                mock_k8s_scaler,
             )
 
         assert "reference" in df.columns
@@ -805,11 +825,20 @@ class TestSpeechClassificationRetryBehavior:
         resource.get_client = MagicMock(return_value=client)
         return resource
 
+    @pytest.fixture
+    def mock_k8s_scaler(self) -> MagicMock:
+        """Create mock K8s scaler resource."""
+        resource = MagicMock()
+        resource.get_replicas = MagicMock(return_value=1)  # NIM already running
+        resource.scale = MagicMock()
+        return resource
+
     def test_output_has_dead_letter_columns(
         self,
         asset_context: AssetExecutionContext,
         sample_cleaned_df: pl.DataFrame,
         mock_minio_for_checkpoint: MagicMock,
+        mock_k8s_scaler: MagicMock,
     ) -> None:
         """Test output DataFrame includes dead letter columns."""
         mock_nim = MagicMock()
@@ -848,6 +877,7 @@ class TestSpeechClassificationRetryBehavior:
                 sample_cleaned_df,
                 mock_nim,
                 mock_minio_for_checkpoint,
+                mock_k8s_scaler,
             )
 
         # Verify dead letter columns exist
@@ -861,6 +891,7 @@ class TestSpeechClassificationRetryBehavior:
         asset_context: AssetExecutionContext,
         sample_cleaned_df: pl.DataFrame,
         mock_minio_for_checkpoint: MagicMock,
+        mock_k8s_scaler: MagicMock,
     ) -> None:
         """Test dead letter columns have correct Polars types."""
         mock_nim = MagicMock()
@@ -898,6 +929,7 @@ class TestSpeechClassificationRetryBehavior:
                 sample_cleaned_df.head(1),
                 mock_nim,
                 mock_minio_for_checkpoint,
+                mock_k8s_scaler,
             )
 
         # Verify column types
@@ -910,6 +942,7 @@ class TestSpeechClassificationRetryBehavior:
         asset_context: AssetExecutionContext,
         sample_cleaned_df: pl.DataFrame,
         mock_minio_for_checkpoint: MagicMock,
+        mock_k8s_scaler: MagicMock,
     ) -> None:
         """Test successful LLM calls have status='success'."""
         mock_nim = MagicMock()
@@ -947,6 +980,7 @@ class TestSpeechClassificationRetryBehavior:
                 sample_cleaned_df.head(1),
                 mock_nim,
                 mock_minio_for_checkpoint,
+                mock_k8s_scaler,
             )
 
         assert df["_llm_status"][0] == "success"
@@ -958,6 +992,7 @@ class TestSpeechClassificationRetryBehavior:
         asset_context: AssetExecutionContext,
         sample_cleaned_df: pl.DataFrame,
         mock_minio_for_checkpoint: MagicMock,
+        mock_k8s_scaler: MagicMock,
     ) -> None:
         """Test failed LLM calls use fallback values."""
         mock_nim = MagicMock()
@@ -993,6 +1028,7 @@ class TestSpeechClassificationRetryBehavior:
                 sample_cleaned_df.head(1),
                 mock_nim,
                 mock_minio_for_checkpoint,
+                mock_k8s_scaler,
             )
 
         assert df["_llm_status"][0] == "failed"
@@ -1039,11 +1075,20 @@ class TestSpeechSummariesRetryBehavior:
         resource.get_client = MagicMock(return_value=client)
         return resource
 
+    @pytest.fixture
+    def mock_k8s_scaler(self) -> MagicMock:
+        """Create mock K8s scaler resource."""
+        resource = MagicMock()
+        resource.get_replicas = MagicMock(return_value=1)  # NIM already running
+        resource.scale = MagicMock()
+        return resource
+
     def test_output_has_dead_letter_columns(
         self,
         asset_context: AssetExecutionContext,
         sample_cleaned_df: pl.DataFrame,
         mock_minio_for_checkpoint: MagicMock,
+        mock_k8s_scaler: MagicMock,
     ) -> None:
         """Test output DataFrame includes dead letter columns."""
         mock_nim = MagicMock()
@@ -1078,6 +1123,7 @@ class TestSpeechSummariesRetryBehavior:
                 sample_cleaned_df,
                 mock_nim,
                 mock_minio_for_checkpoint,
+                mock_k8s_scaler,
             )
 
         # Verify dead letter columns exist
@@ -1091,6 +1137,7 @@ class TestSpeechSummariesRetryBehavior:
         asset_context: AssetExecutionContext,
         sample_cleaned_df: pl.DataFrame,
         mock_minio_for_checkpoint: MagicMock,
+        mock_k8s_scaler: MagicMock,
     ) -> None:
         """Test successful summaries have status='success'."""
         mock_nim = MagicMock()
@@ -1125,6 +1172,7 @@ class TestSpeechSummariesRetryBehavior:
                 sample_cleaned_df,
                 mock_nim,
                 mock_minio_for_checkpoint,
+                mock_k8s_scaler,
             )
 
         assert df["_llm_status"][0] == "success"
@@ -1136,6 +1184,7 @@ class TestSpeechSummariesRetryBehavior:
         asset_context: AssetExecutionContext,
         sample_cleaned_df: pl.DataFrame,
         mock_minio_for_checkpoint: MagicMock,
+        mock_k8s_scaler: MagicMock,
     ) -> None:
         """Test failed summaries use fallback values."""
         mock_nim = MagicMock()
@@ -1168,6 +1217,7 @@ class TestSpeechSummariesRetryBehavior:
                 sample_cleaned_df,
                 mock_nim,
                 mock_minio_for_checkpoint,
+                mock_k8s_scaler,
             )
 
         assert df["_llm_status"][0] == "failed"

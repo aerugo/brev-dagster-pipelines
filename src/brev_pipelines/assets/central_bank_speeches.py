@@ -52,6 +52,35 @@ from brev_pipelines.types import (
     WeaviatePropertyDef,
 )
 
+
+def _ensure_nim_reasoning_ready(
+    context: dg.AssetExecutionContext,
+    k8s_scaler: K8sScalerResource,
+) -> None:
+    """Ensure nim-reasoning is scaled up and ready before LLM calls.
+
+    The embedding step scales down nim-reasoning to free GPU memory.
+    This helper ensures it's running before classification/summarization.
+
+    Args:
+        context: Dagster execution context for logging.
+        k8s_scaler: Kubernetes scaler to manage deployments.
+    """
+    current_replicas = k8s_scaler.get_replicas("nim-reasoning", "nvidia-ai")
+
+    if current_replicas == 0:
+        context.log.info("nim-reasoning is scaled to 0, scaling up before LLM calls")
+        k8s_scaler.scale(
+            deployment="nim-reasoning",
+            namespace="nvidia-ai",
+            replicas=1,
+            wait_ready=True,
+        )
+        context.log.info("nim-reasoning is now ready")
+    else:
+        context.log.debug(f"nim-reasoning already running with {current_replicas} replicas")
+
+
 # Collection schema for Weaviate
 SPEECHES_SCHEMA: list[WeaviatePropertyDef] = [
     WeaviatePropertyDef(name="reference", type="text", description="Unique identifier from source"),
@@ -467,6 +496,7 @@ def speech_classification(
     cleaned_speeches: pl.DataFrame,
     nim_reasoning: NIMResource,
     minio: MinIOResource,
+    k8s_scaler: K8sScalerResource,
 ) -> pl.DataFrame:
     """Classify speeches on multiple dimensions using GPT-OSS 120B.
 
@@ -484,10 +514,14 @@ def speech_classification(
         cleaned_speeches: Cleaned DataFrame with speech text.
         nim_reasoning: NIM reasoning resource (GPT-OSS 120B).
         minio: MinIO resource for checkpoint storage.
+        k8s_scaler: Kubernetes scaler to ensure NIM is ready.
 
     Returns:
         DataFrame with classification columns added.
     """
+    # Ensure nim-reasoning is running before making LLM calls
+    _ensure_nim_reasoning_ready(context, k8s_scaler)
+
     df = cleaned_speeches
 
     # Create checkpoint manager
@@ -717,6 +751,7 @@ def speech_summaries(
     cleaned_speeches: pl.DataFrame,
     nim_reasoning: NIMResource,
     minio: MinIOResource,
+    k8s_scaler: K8sScalerResource,
 ) -> pl.DataFrame:
     """Generate bullet-point summaries of central bank speeches.
 
@@ -732,10 +767,14 @@ def speech_summaries(
         cleaned_speeches: Cleaned DataFrame with speech text.
         nim_reasoning: NIM reasoning resource for summary generation (GPT-OSS 120B).
         minio: MinIO resource for checkpoint storage.
+        k8s_scaler: Kubernetes scaler to ensure NIM is ready.
 
     Returns:
         DataFrame with reference and summary columns.
     """
+    # Ensure nim-reasoning is running before making LLM calls
+    _ensure_nim_reasoning_ready(context, k8s_scaler)
+
     df = cleaned_speeches
 
     # Create checkpoint manager

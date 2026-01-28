@@ -14,12 +14,9 @@ This prevents trial runs from overwriting production data.
 
 Synthesis Pipeline (depends on speeches pipeline completion):
 - synthetic_full_run: Generate synthetic data from enriched speeches
-- synthetic_trial_run: Synthesis trial run with 10 records
 """
 
 from dagster import AssetSelection, define_asset_job
-
-from brev_pipelines.config import TRIAL_RUN_CONFIG
 
 # Asset selections - separate groups for trial and production
 SPEECHES_PRODUCTION_ASSETS = AssetSelection.groups("central_bank_speeches")
@@ -64,22 +61,6 @@ synthetic_full_run = define_asset_job(
     selection=SYNTHETIC_ASSETS,
 )
 
-synthetic_trial_run = define_asset_job(
-    name="synthetic_trial_run",
-    description=(
-        "Synthesis trial: Generate synthetic data with limited records for testing. "
-        "Loads from trial LakeFS path, uses separate Weaviate collections."
-    ),
-    selection=SYNTHETIC_ASSETS,
-    config={
-        "ops": {
-            "enriched_data_for_synthesis": {"config": TRIAL_RUN_CONFIG},
-            "synthetic_data_product": {"config": TRIAL_RUN_CONFIG},
-            "synthetic_weaviate_index": {"config": TRIAL_RUN_CONFIG},
-        },
-    },
-)
-
 # Export all jobs
 all_jobs = [
     # ETL pipeline
@@ -87,5 +68,4 @@ all_jobs = [
     speeches_trial_run,
     # Synthesis pipeline (requires speeches pipeline to complete first)
     synthetic_full_run,
-    synthetic_trial_run,
 ]

@@ -102,8 +102,6 @@ For testing the pipeline end-to-end with minimal data:
 | Job | Description |
 |-----|-------------|
 | `speeches_trial_run` | Real speeches pipeline with 10 records |
-| `synthetic_trial_run` | Synthetic generation with 10 records |
-| `full_pipeline_trial_run` | Complete pipeline (real + synthetic) with 10 records |
 
 ### Full Runs (all records)
 
@@ -111,7 +109,6 @@ For testing the pipeline end-to-end with minimal data:
 |-----|-------------|
 | `speeches_full_run` | Process all speeches |
 | `synthetic_full_run` | Generate synthetic for all speeches |
-| `full_pipeline_full_run` | Complete pipeline (real + synthetic) |
 
 ---
 

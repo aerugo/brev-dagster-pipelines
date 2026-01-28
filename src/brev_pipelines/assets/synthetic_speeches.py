@@ -40,6 +40,7 @@ from brev_pipelines.resources.lakefs import (
     LakeFSNotFoundError,
     LakeFSResource,
 )
+from brev_pipelines.resources.k8s_scaler import K8sScalerResource
 from brev_pipelines.resources.minio import MinIOResource
 from brev_pipelines.resources.nim_embedding import NIMEmbeddingResource
 from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
@@ -269,6 +270,7 @@ def synthetic_summaries(
     context: dg.AssetExecutionContext,
     enriched_data_for_synthesis: pl.DataFrame,
     safe_synth: SafeSynthesizerResource,
+    k8s_scaler: K8sScalerResource,
 ) -> tuple[pl.DataFrame, dict[str, Any]]:
     """Generate synthetic speech metadata + summaries using Safe Synthesizer.
 
@@ -389,6 +391,11 @@ def synthetic_summaries(
         context.log.warning(
             f"Dataset has {num_records} records (<500) - disabling holdout for synthesis"
         )
+
+    # Scale up nim-llm for PII classification during Safe Synthesizer's initial phase.
+    # KAI scheduler will preempt NIM when Safe Synthesizer needs the GPU for training.
+    context.log.info("Scaling up nim-llm for Safe Synthesizer PII classification...")
+    k8s_scaler.scale("nim-llm", "nvidia-ai", replicas=1, wait_ready=True)
 
     # Single synthesis call with ALL data - wrapped with retry logic
     context.log.info("Starting Safe Synthesizer with retry support...")

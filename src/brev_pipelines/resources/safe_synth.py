@@ -676,6 +676,11 @@ size {file_size}
             },
         }
 
+        # Add data config (e.g., holdout=0 for small datasets)
+        data_config = config.get("data") if config else None
+        if data_config is not None:
+            synth_config["data"] = data_config
+
         # Add differential privacy only if explicitly requested
         # DP adds noise that can cause underfitting - use higher epsilon (8-12) if needed
         epsilon = config.get("epsilon") if config else None

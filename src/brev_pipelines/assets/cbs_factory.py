@@ -112,6 +112,13 @@ def build_cbs_assets(*, is_trial: bool) -> Sequence[dg.AssetsDefinition]:
     weaviate_collection = "CentralBankSpeechesTrial" if is_trial else "CentralBankSpeeches"
     sample_size = 10 if is_trial else 0  # 0 means no limit
 
+    # Helper to build asset keys with correct prefix
+    def _key(name: str) -> dg.AssetKey:
+        """Build asset key with prefix."""
+        if key_prefix:
+            return dg.AssetKey([*key_prefix, name])
+        return dg.AssetKey(name)
+
     @dg.asset(
         name="raw_speeches",
         key_prefix=key_prefix,
@@ -163,6 +170,7 @@ def build_cbs_assets(*, is_trial: bool) -> Sequence[dg.AssetsDefinition]:
         description="Cleaned speeches with null values filled",
         group_name=group_name,
         io_manager_key=io_manager_key,
+        ins={"raw_speeches": dg.AssetIn(key=_key("raw_speeches"))},
         metadata={"layer": "cleaned", "is_trial": str(is_trial)},
     )
     def cleaned_speeches(
@@ -192,19 +200,13 @@ def build_cbs_assets(*, is_trial: bool) -> Sequence[dg.AssetsDefinition]:
         context.log.info(f"Cleaned {len(df)} speeches")
         return df
 
-    # Build asset key for dependencies
-    def _asset_key(name: str) -> dg.AssetKey:
-        """Build asset key with prefix."""
-        if key_prefix:
-            return dg.AssetKey([*key_prefix, name])
-        return dg.AssetKey(name)
-
     @dg.asset(
         name="speech_classification",
         key_prefix=key_prefix,
         description="Multi-dimensional speech classification using GPT-OSS 120B",
         group_name=group_name,
         io_manager_key=io_manager_key,
+        ins={"cleaned_speeches": dg.AssetIn(key=_key("cleaned_speeches"))},
         metadata={
             "layer": "enriched",
             "uses_gpu": "true",
@@ -337,6 +339,7 @@ def build_cbs_assets(*, is_trial: bool) -> Sequence[dg.AssetsDefinition]:
         description="Compact speech summaries for Safe Synthesizer training",
         group_name=group_name,
         io_manager_key=io_manager_key,
+        ins={"cleaned_speeches": dg.AssetIn(key=_key("cleaned_speeches"))},
         metadata={
             "layer": "enriched",
             "uses_gpu": "true",
@@ -449,12 +452,16 @@ def build_cbs_assets(*, is_trial: bool) -> Sequence[dg.AssetsDefinition]:
         key_prefix=key_prefix,
         description="Speeches with generated embeddings from local NIM",
         group_name=group_name,
+        ins={
+            "cleaned_speeches": dg.AssetIn(key=_key("cleaned_speeches")),
+            "speech_summaries": dg.AssetIn(key=_key("speech_summaries")),
+        },
+        deps=[dg.AssetDep(_key("speech_classification"))],
         metadata={
             "layer": "enriched",
             "uses_nim_embedding": "true",
             "is_trial": str(is_trial),
         },
-        deps=[dg.AssetDep(_asset_key("speech_classification"))],
     )
     def speech_embeddings(
         context: dg.AssetExecutionContext,
@@ -590,6 +597,11 @@ def build_cbs_assets(*, is_trial: bool) -> Sequence[dg.AssetsDefinition]:
         description="Combined enriched speeches data product with summaries",
         group_name=group_name,
         io_manager_key=io_manager_key,
+        ins={
+            "speech_embeddings": dg.AssetIn(key=_key("speech_embeddings")),
+            "speech_summaries": dg.AssetIn(key=_key("speech_summaries")),
+            "speech_classification": dg.AssetIn(key=_key("speech_classification")),
+        },
         metadata={"layer": "product", "is_trial": str(is_trial)},
     )
     def enriched_speeches(
@@ -663,6 +675,7 @@ def build_cbs_assets(*, is_trial: bool) -> Sequence[dg.AssetsDefinition]:
         key_prefix=key_prefix,
         description="Data product metadata and statistics",
         group_name=group_name,
+        ins={"enriched_speeches": dg.AssetIn(key=_key("enriched_speeches"))},
         metadata={"layer": "output", "is_trial": str(is_trial)},
     )
     def speeches_data_product(
@@ -696,6 +709,10 @@ def build_cbs_assets(*, is_trial: bool) -> Sequence[dg.AssetsDefinition]:
         key_prefix=key_prefix,
         description="Vector search index in Weaviate",
         group_name=group_name,
+        ins={
+            "speech_embeddings": dg.AssetIn(key=_key("speech_embeddings")),
+            "speech_classification": dg.AssetIn(key=_key("speech_classification")),
+        },
         metadata={
             "layer": "output",
             "destination": "weaviate",

@@ -50,20 +50,31 @@ def _ensure_nim_reasoning_ready(
     context: dg.AssetExecutionContext,
     k8s_scaler: K8sScalerResource,
 ) -> None:
-    """Ensure nim-reasoning is scaled up and ready before LLM calls."""
+    """Ensure nim-reasoning is scaled up and ready before LLM calls.
+
+    Scales down safe-synth to free GPU memory (nim-reasoning 80Gi +
+    nim-llm 25Gi + safe-synth 40Gi + nim-embedding 2Gi = 147Gi > 141Gi).
+    """
     current_replicas = k8s_scaler.get_replicas("nim-reasoning", "nvidia-ai")
 
     if current_replicas == 0:
-        context.log.info("nim-reasoning is scaled to 0, scaling up before LLM calls")
+        context.log.info("Scaling down safe-synth to free GPU for nim-reasoning")
+        k8s_scaler.scale(
+            deployment="nvidia-safe-synth-safe-synthesizer",
+            namespace="nvidia-ai",
+            replicas=0,
+            wait_ready=False,
+        )
+        context.log.info("Scaling up nim-reasoning")
         k8s_scaler.scale(
             deployment="nim-reasoning",
             namespace="nvidia-ai",
             replicas=1,
             wait_ready=True,
         )
-        context.log.info("nim-reasoning is now ready")
+        context.log.info("nim-reasoning is ready")
     else:
-        context.log.debug(f"nim-reasoning already running with {current_replicas} replicas")
+        context.log.debug(f"nim-reasoning already at {current_replicas} replicas")
 
 
 # Collection schema for Weaviate
@@ -332,6 +343,10 @@ def build_cbs_assets(*, is_trial: bool) -> Sequence[dg.AssetsDefinition]:
 
         context.log.info(f"Classification complete: {success_count}/{total} ({success_rate})")
 
+        if total > 0 and success_count == 0:
+            msg = f"Classification failed for all {total} rows. First error: {df['_llm_error'][0]}"
+            raise RuntimeError(msg)
+
         return df
 
     @dg.asset(
@@ -446,6 +461,10 @@ def build_cbs_assets(*, is_trial: bool) -> Sequence[dg.AssetsDefinition]:
 
         context.log.info(f"Summarization complete: {success_count}/{total} ({success_rate})")
 
+        if total > 0 and success_count == 0:
+            msg = f"Summarization failed for all {total} rows. First error: {results_df['_llm_error'][0]}"
+            raise RuntimeError(msg)
+
         return results_df
 
     @dg.asset(
@@ -509,6 +528,14 @@ def build_cbs_assets(*, is_trial: bool) -> Sequence[dg.AssetsDefinition]:
             replicas=0,
             restore_wait_ready=True,
         ):
+            # Restore safe-synth now that nim-reasoning is down
+            context.log.info("Restoring safe-synth after nim-reasoning scale-down")
+            k8s_scaler.scale(
+                deployment="nvidia-safe-synth-safe-synthesizer",
+                namespace="nvidia-ai",
+                replicas=1,
+                wait_ready=False,
+            )
             context.log.info("nim-reasoning scaled down, starting embedding generation")
 
             checkpoint_mgr = LLMCheckpointManager(

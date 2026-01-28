@@ -692,8 +692,11 @@ size {file_size}
                 "patience": 5,
                 "invalid_fraction_threshold": 0.9,
                 # Enable structured generation to force valid JSON output
+                # Use "json" method instead of "regex" - regex with maxLength is CPU-bound
+                # and causes 0% GPU utilization. JSON method is 3-10x faster.
                 "use_structured_generation": True,
                 "structured_generation_backend": "auto",
+                "structured_generation_schema_method": "json",
             },
         }
 

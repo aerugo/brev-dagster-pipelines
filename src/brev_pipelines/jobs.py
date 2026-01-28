@@ -3,25 +3,27 @@
 Provides pre-configured jobs for common pipeline operations:
 
 ETL Pipeline (speeches):
-- speeches_full_run: Process all records with GPT-OSS summaries
-- speeches_trial_run: Process only 10 records for testing
+- speeches_full_run: Process all records with GPT-OSS summaries (production assets)
+- speeches_trial_run: Process only 10 records for testing (trial assets)
+
+The trial and production pipelines use completely separate asset graphs:
+- Production: central_bank_speeches group, lakefs_parquet IO manager
+- Trial: cbs_trial group, lakefs_parquet_trial IO manager
+
+This prevents trial runs from overwriting production data.
 
 Synthesis Pipeline (depends on speeches pipeline completion):
 - synthetic_full_run: Generate synthetic data from enriched speeches
 - synthetic_trial_run: Synthesis trial run with 10 records
-
-Note: The synthetic pipeline has an explicit dependency on speeches_data_product,
-so it cannot be run until the speeches pipeline has completed successfully.
-This prevents data consistency issues and pickle truncation errors that occurred
-when running both pipelines simultaneously.
 """
 
 from dagster import AssetSelection, define_asset_job
 
 from brev_pipelines.config import TRIAL_RUN_CONFIG
 
-# Asset selections
-SPEECHES_ASSETS = AssetSelection.groups("central_bank_speeches")
+# Asset selections - separate groups for trial and production
+SPEECHES_PRODUCTION_ASSETS = AssetSelection.groups("central_bank_speeches")
+SPEECHES_TRIAL_ASSETS = AssetSelection.groups("cbs_trial")
 SYNTHETIC_ASSETS = AssetSelection.groups("synthetic_speeches")
 
 # =============================================================================
@@ -32,27 +34,20 @@ speeches_full_run = define_asset_job(
     name="speeches_full_run",
     description=(
         "ETL pipeline with GPT-OSS summaries. "
-        "Processes all speeches, generates summaries, and stores in LakeFS."
+        "Processes all speeches, generates summaries, and stores in LakeFS. "
+        "Uses production asset graph (central_bank_speeches group)."
     ),
-    selection=SPEECHES_ASSETS,
+    selection=SPEECHES_PRODUCTION_ASSETS,
 )
 
 speeches_trial_run = define_asset_job(
     name="speeches_trial_run",
     description=(
         "ETL trial: Process only 10 speeches for testing. "
-        "Uses separate collections/paths to avoid affecting production data."
+        "Uses completely separate trial asset graph (cbs_trial group) "
+        "with trial/ LakeFS paths and separate Weaviate collection."
     ),
-    selection=SPEECHES_ASSETS,
-    config={
-        # Note: Dagster uses "ops" as the config key for asset configurations.
-        # This is expected behavior - assets use the same config namespace as ops.
-        "ops": {
-            "raw_speeches": {"config": TRIAL_RUN_CONFIG},
-            "speeches_data_product": {"config": TRIAL_RUN_CONFIG},
-            "weaviate_index": {"config": TRIAL_RUN_CONFIG},
-        },
-    },
+    selection=SPEECHES_TRIAL_ASSETS,
 )
 
 # =============================================================================

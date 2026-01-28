@@ -9,7 +9,7 @@ import os
 
 from dagster import Definitions, EnvVar
 
-from brev_pipelines.assets.central_bank_speeches import central_bank_speeches_assets
+from brev_pipelines.assets.cbs_factory import production_cbs_assets, trial_cbs_assets
 from brev_pipelines.assets.demo import demo_assets
 from brev_pipelines.assets.health import health_assets
 from brev_pipelines.assets.synthetic_speeches import synthetic_speeches_assets
@@ -65,7 +65,8 @@ defs = Definitions(
         *demo_assets,
         *health_assets,
         *validation_assets,
-        *central_bank_speeches_assets,
+        *production_cbs_assets,
+        *trial_cbs_assets,
         *synthetic_speeches_assets,
     ],
     jobs=all_jobs,
@@ -140,7 +141,24 @@ defs = Definitions(
             repository="data",
             branch="main",
             base_path="central-bank-speeches",
-            is_trial=_env_bool("IS_TRIAL", default=False),
+            is_trial=False,
+        ),
+        "lakefs_parquet_trial": LakeFSPolarsIOManager(
+            lakefs=LakeFSResource(
+                endpoint=_env("LAKEFS_ENDPOINT", "lakefs.lakefs.svc.cluster.local:8000"),
+                access_key=EnvVar("LAKEFS_ACCESS_KEY_ID"),
+                secret_key=EnvVar("LAKEFS_SECRET_ACCESS_KEY"),
+            ),
+            minio=MinIOResource(
+                endpoint=_env("MINIO_ENDPOINT", "minio.minio.svc.cluster.local:9000"),
+                access_key=EnvVar("MINIO_ACCESS_KEY"),
+                secret_key=EnvVar("MINIO_SECRET_KEY"),
+                secure=False,
+            ),
+            repository="data",
+            branch="main",
+            base_path="central-bank-speeches",
+            is_trial=True,
         ),
     },
 )

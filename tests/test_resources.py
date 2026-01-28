@@ -130,10 +130,10 @@ class TestSafeSynthesizerResource:
 
         resource = SafeSynthesizerResource(
             namespace="nvidia-ai",
-            priority_class="batch-high",
+            priority_class="build-preemptible",
         )
         assert resource.namespace == "nvidia-ai"
-        assert resource.priority_class == "batch-high"
+        assert resource.priority_class == "build-preemptible"
 
     def test_default_config(self):
         """Test default configuration values."""
@@ -142,7 +142,7 @@ class TestSafeSynthesizerResource:
         resource = SafeSynthesizerResource()
         assert resource.poll_interval == 30
         assert resource.max_wait_time == 7200
-        assert resource.gpu_memory == "80Gi"
+        assert resource.gpu_memory == "40Gi"
 
     def test_priority_class_setting(self):
         """Test that priority class is configurable."""
@@ -186,9 +186,9 @@ class TestSafeSynthesizerResource:
         from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
 
         resource = SafeSynthesizerResource(
-            priority_class="batch-high",
-            gpu_memory="80Gi",
+            priority_class="build-preemptible",
+            gpu_memory="40Gi",
         )
-        # batch-high (130) > inference (125) allows preemption
-        assert resource.priority_class == "batch-high"
-        assert resource.gpu_memory == "80Gi"
+        # Safe Synth coexists with nim-llm via KAI fractional GPU allocation
+        assert resource.priority_class == "build-preemptible"
+        assert resource.gpu_memory == "40Gi"

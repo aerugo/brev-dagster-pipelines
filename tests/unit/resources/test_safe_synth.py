@@ -12,7 +12,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from brev_pipelines.types import (
-    K8sAppsV1Api,
     K8sBatchV1Api,
     K8sCoreV1Api,
     SafeSynthConfig,
@@ -31,12 +30,11 @@ class TestSafeSynthesizerResourceInit:
         resource = SafeSynthesizerResource()
 
         assert resource.namespace == "nvidia-ai"
-        assert resource.deployment_name == "nvidia-safe-synth-safe-synthesizer"
         assert "nvcr.io/nvidia" in resource.image
         assert resource.poll_interval == 30
         assert resource.max_wait_time == 7200
-        assert resource.gpu_memory == "80Gi"
-        assert resource.priority_class == "batch-high"
+        assert resource.gpu_memory == "40Gi"
+        assert resource.priority_class == "build-preemptible"
 
     def test_resource_custom_config(self):
         """Test SafeSynthesizerResource with custom configuration."""
@@ -44,7 +42,6 @@ class TestSafeSynthesizerResourceInit:
 
         resource = SafeSynthesizerResource(
             namespace="custom-ns",
-            deployment_name="my-safe-synth",
             poll_interval=60,
             max_wait_time=3600,
             gpu_memory="40Gi",
@@ -52,7 +49,6 @@ class TestSafeSynthesizerResourceInit:
         )
 
         assert resource.namespace == "custom-ns"
-        assert resource.deployment_name == "my-safe-synth"
         assert resource.poll_interval == 60
         assert resource.max_wait_time == 3600
         assert resource.gpu_memory == "40Gi"
@@ -111,118 +107,6 @@ class TestK8sClientCreation:
         # Verify client has expected methods
         assert hasattr(client, "list_namespaced_pod")
         assert hasattr(client, "read_namespaced_pod_log")
-
-    @patch("brev_pipelines.resources.safe_synth.SafeSynthesizerResource._get_k8s_apps_client")
-    def test_get_k8s_apps_client_returns_apps_api(self, mock_method: MagicMock):
-        """Test _get_k8s_apps_client returns K8sAppsV1Api-compatible client."""
-        from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
-
-        mock_client = MagicMock()
-        mock_client.read_namespaced_deployment = MagicMock()
-        mock_client.patch_namespaced_deployment_scale = MagicMock()
-        mock_method.return_value = mock_client
-
-        resource = SafeSynthesizerResource()
-        client = resource._get_k8s_apps_client()
-
-        # Verify client has expected methods
-        assert hasattr(client, "read_namespaced_deployment")
-        assert hasattr(client, "patch_namespaced_deployment_scale")
-
-
-class TestDeploymentScaling:
-    """Tests for deployment scaling operations."""
-
-    @patch("brev_pipelines.resources.safe_synth.SafeSynthesizerResource._get_k8s_apps_client")
-    def test_scale_deployment_up(self, mock_get_client: MagicMock):
-        """Test scaling deployment to 1 replica."""
-        from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
-
-        mock_client = MagicMock()
-        mock_get_client.return_value = mock_client
-
-        resource = SafeSynthesizerResource()
-        resource._scale_deployment(replicas=1)
-
-        mock_client.patch_namespaced_deployment_scale.assert_called_once_with(
-            name=resource.deployment_name,
-            namespace=resource.namespace,
-            body={"spec": {"replicas": 1}},
-        )
-
-    @patch("brev_pipelines.resources.safe_synth.SafeSynthesizerResource._get_k8s_apps_client")
-    def test_scale_deployment_down(self, mock_get_client: MagicMock):
-        """Test scaling deployment to 0 replicas."""
-        from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
-
-        mock_client = MagicMock()
-        mock_get_client.return_value = mock_client
-
-        resource = SafeSynthesizerResource()
-        resource._scale_deployment(replicas=0)
-
-        mock_client.patch_namespaced_deployment_scale.assert_called_once_with(
-            name=resource.deployment_name,
-            namespace=resource.namespace,
-            body={"spec": {"replicas": 0}},
-        )
-
-
-class TestWaitForReady:
-    """Tests for deployment readiness waiting."""
-
-    @patch("brev_pipelines.resources.safe_synth.requests.get")
-    @patch("brev_pipelines.resources.safe_synth.SafeSynthesizerResource._get_k8s_apps_client")
-    def test_wait_for_ready_success(self, mock_get_client: MagicMock, mock_requests_get: MagicMock):
-        """Test waiting for deployment to become ready."""
-        from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
-
-        # Mock deployment with ready replicas
-        mock_deployment = MagicMock()
-        mock_deployment.status.ready_replicas = 1
-        mock_client = MagicMock()
-        mock_client.read_namespaced_deployment.return_value = mock_deployment
-        mock_get_client.return_value = mock_client
-
-        # Mock health check response
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_requests_get.return_value = mock_response
-
-        resource = SafeSynthesizerResource()
-        result = resource._wait_for_ready(timeout=10)
-
-        assert result is True
-
-    @patch("brev_pipelines.resources.safe_synth.time.sleep")
-    @patch("brev_pipelines.resources.safe_synth.time.time")
-    @patch("brev_pipelines.resources.safe_synth.SafeSynthesizerResource._get_k8s_apps_client")
-    def test_wait_for_ready_timeout(
-        self,
-        mock_get_client: MagicMock,
-        mock_time: MagicMock,
-        mock_sleep: MagicMock,
-    ):
-        """Test timeout when deployment doesn't become ready."""
-        from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
-
-        # Mock deployment with no ready replicas
-        mock_deployment = MagicMock()
-        mock_deployment.status.ready_replicas = None
-        mock_client = MagicMock()
-        mock_client.read_namespaced_deployment.return_value = mock_deployment
-        mock_get_client.return_value = mock_client
-
-        # Simulate time passing beyond timeout
-        mock_time.side_effect = [0, 5, 15]  # Start, first check, timeout
-
-        resource = SafeSynthesizerResource()
-
-        from brev_pipelines.resources.safe_synth_retry import SafeSynthTimeoutError
-
-        with pytest.raises(SafeSynthTimeoutError, match="not ready"):
-            resource._wait_for_ready(timeout=10)
-
 
 class TestCreateSynthesisJob:
     """Tests for Kubernetes job creation."""
@@ -431,70 +315,49 @@ class TestSynthesize:
     """Tests for full synthesis pipeline."""
 
     @patch("brev_pipelines.resources.safe_synth.SafeSynthesizerResource._synthesize_via_api")
-    @patch("brev_pipelines.resources.safe_synth.SafeSynthesizerResource._wait_for_ready")
-    @patch("brev_pipelines.resources.safe_synth.SafeSynthesizerResource._scale_deployment")
     @patch("brev_pipelines.resources.safe_synth.SafeSynthesizerResource.health_check")
-    def test_synthesize_scales_deployment(
+    def test_synthesize_calls_api_when_healthy(
         self,
         mock_health: MagicMock,
-        mock_scale: MagicMock,
-        mock_wait: MagicMock,
         mock_synth: MagicMock,
     ):
-        """Test synthesize scales deployment up and down."""
+        """Test synthesize calls API directly when service is healthy."""
         from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
 
-        mock_health.return_value = False  # Not already running
-        mock_wait.return_value = True
+        mock_health.return_value = True
         mock_synth.return_value = ([{"col": "val"}], {"job_id": "test"})
 
         resource = SafeSynthesizerResource()
-        input_data = [{"text": "Sample speech"}]
+        resource.synthesize([{"text": "Sample speech"}], run_id="test-run")
 
-        resource.synthesize(input_data, run_id="test-run")
+        mock_synth.assert_called_once()
 
-        # Should scale up, wait, synthesize, scale down
-        assert mock_scale.call_count == 2
-        mock_scale.assert_any_call(replicas=1)
-        mock_scale.assert_any_call(replicas=0)
-
-    @patch("brev_pipelines.resources.safe_synth.SafeSynthesizerResource._synthesize_via_api")
-    @patch("brev_pipelines.resources.safe_synth.SafeSynthesizerResource._scale_deployment")
     @patch("brev_pipelines.resources.safe_synth.SafeSynthesizerResource.health_check")
-    def test_synthesize_skips_scaling_when_running(
+    def test_synthesize_falls_back_to_mock_when_unhealthy(
         self,
         mock_health: MagicMock,
-        mock_scale: MagicMock,
-        mock_synth: MagicMock,
     ):
-        """Test synthesize skips scaling when service already running."""
+        """Test synthesize uses mock fallback when service is unhealthy."""
         from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
 
-        mock_health.return_value = True  # Already running
-        mock_synth.return_value = ([{"col": "val"}], {"job_id": "test"})
+        mock_health.return_value = False
 
-        resource = SafeSynthesizerResource()
-        resource.synthesize([{"text": "Sample"}], run_id="test")
+        resource = SafeSynthesizerResource(use_mock_fallback=True)
+        result, evaluation = resource.synthesize([{"text": "Sample"}], run_id="test")
 
-        # Should not scale when already running
-        mock_scale.assert_not_called()
+        assert evaluation["job_id"].startswith("mock-")
 
     @patch("brev_pipelines.resources.safe_synth.SafeSynthesizerResource._synthesize_via_api")
-    @patch("brev_pipelines.resources.safe_synth.SafeSynthesizerResource._wait_for_ready")
-    @patch("brev_pipelines.resources.safe_synth.SafeSynthesizerResource._scale_deployment")
     @patch("brev_pipelines.resources.safe_synth.SafeSynthesizerResource.health_check")
     def test_synthesize_with_config(
         self,
         mock_health: MagicMock,
-        mock_scale: MagicMock,
-        mock_wait: MagicMock,
         mock_synth: MagicMock,
     ):
         """Test synthesize passes config to API."""
         from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
 
-        mock_health.return_value = False
-        mock_wait.return_value = True
+        mock_health.return_value = True
         mock_synth.return_value = ([{"col": "val"}], {"job_id": "test"})
 
         resource = SafeSynthesizerResource()
@@ -564,17 +427,6 @@ class TestTypeAnnotations:
         )
         assert "return" in hints
         assert hints["return"] is K8sCoreV1Api
-
-    def test_get_k8s_apps_client_return_type(self):
-        """Test _get_k8s_apps_client has proper return type annotation."""
-        from brev_pipelines.resources.safe_synth import SafeSynthesizerResource
-
-        hints = get_type_hints(
-            SafeSynthesizerResource._get_k8s_apps_client,
-            globalns={"K8sAppsV1Api": K8sAppsV1Api},
-        )
-        assert "return" in hints
-        assert hints["return"] is K8sAppsV1Api
 
     def test_create_synthesis_job_synth_config_type(self):
         """Test create_synthesis_job accepts SafeSynthConfig."""

@@ -1,17 +1,15 @@
 """NVIDIA Safe Synthesizer resource for Dagster.
 
-Manages Safe Synthesizer deployment with automatic GPU time-sharing.
-Uses KAI Scheduler priority-based preemption for GPU orchestration.
+Manages Safe Synthesizer API calls for synthetic data generation.
+Safe Synthesizer runs always-on alongside nim-llm via KAI fractional GPU allocation.
 
 Uses NVIDIA's official NeMo Microservices Helm Chart (nemo-safe-synthesizer).
 
 How it works:
-1. Dagster scales nemo-safe-synthesizer deployment from 0 to 1 replica
-2. KAI Scheduler preempts nim-llm (priority 125) for safe-synth (priority 130)
-3. Safe Synthesizer runs the synthesis job
-4. Dagster scales nemo-safe-synthesizer back to 0 replicas
-5. nim-llm automatically restarts
-6. No manual intervention required!
+1. Safe Synthesizer service is always running (replicaCount=1)
+2. KAI Scheduler allocates fractional GPU: safe-synth 40Gi + nim-llm 25Gi = 65Gi << 141Gi H200
+3. Dagster calls the synthesis API directly (no scaling needed)
+4. nim-llm stays running throughout for PII classification
 """
 
 from __future__ import annotations
@@ -34,7 +32,7 @@ from brev_pipelines.types import SafeSynthConfig, SafeSynthEvaluationResult, Saf
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from brev_pipelines.types import K8sAppsV1Api, K8sBatchV1Api, K8sCoreV1Api
+    from brev_pipelines.types import K8sBatchV1Api, K8sCoreV1Api
 
 
 class SafeSynthesizerResource(ConfigurableResource):
@@ -60,10 +58,6 @@ class SafeSynthesizerResource(ConfigurableResource):
     namespace: str = Field(
         default="nvidia-ai",
         description="Kubernetes namespace for Safe Synthesizer",
-    )
-    deployment_name: str = Field(
-        default="nvidia-safe-synth-safe-synthesizer",
-        description="Kubernetes deployment name for Safe Synthesizer",
     )
     image: str = Field(
         default="nvcr.io/nvidia/nemo-microservices/safe-synthesizer:25.12",
@@ -94,12 +88,12 @@ class SafeSynthesizerResource(ConfigurableResource):
         description="Max job wait time in seconds (default 2 hours)",
     )
     gpu_memory: str = Field(
-        default="80Gi",
+        default="40Gi",
         description="GPU memory allocation for KAI Scheduler",
     )
     priority_class: str = Field(
-        default="batch-high",
-        description="Kubernetes priority class for preemption",
+        default="build-preemptible",
+        description="Kubernetes priority class for batch jobs",
     )
     use_mock_fallback: bool = Field(
         default=True,
@@ -142,60 +136,6 @@ class SafeSynthesizerResource(ConfigurableResource):
         except config.ConfigException:
             config.load_kube_config()
         return client.CoreV1Api()  # type: ignore[no-any-return]
-
-    def _get_k8s_apps_client(self) -> K8sAppsV1Api:
-        """Get Kubernetes apps API client."""
-        from kubernetes import client, config
-
-        try:
-            config.load_incluster_config()
-        except config.ConfigException:
-            config.load_kube_config()
-        return client.AppsV1Api()  # type: ignore[no-any-return]
-
-    def _scale_deployment(self, replicas: int) -> None:
-        """Scale the nemo-safe-synthesizer deployment.
-
-        Args:
-            replicas: Target replica count (0 or 1).
-        """
-        apps_api = self._get_k8s_apps_client()
-        apps_api.patch_namespaced_deployment_scale(
-            name=self.deployment_name,
-            namespace=self.namespace,
-            body={"spec": {"replicas": replicas}},
-        )
-
-    def _wait_for_ready(self, timeout: int = 600) -> bool:
-        """Wait for nemo-safe-synthesizer deployment to be ready.
-
-        Args:
-            timeout: Maximum wait time in seconds.
-
-        Returns:
-            True if ready, raises TimeoutError otherwise.
-        """
-        apps_api = self._get_k8s_apps_client()
-        start_time = time.time()
-
-        while time.time() - start_time < timeout:
-            deployment = apps_api.read_namespaced_deployment(
-                name=self.deployment_name,
-                namespace=self.namespace,
-            )
-            if deployment.status.ready_replicas and deployment.status.ready_replicas >= 1:
-                # Also verify the service is responding
-                try:
-                    response = requests.get(f"{self.service_endpoint}/health", timeout=10)
-                    if response.status_code == 200:
-                        return True
-                except Exception:
-                    pass
-            time.sleep(10)
-
-        raise SafeSynthTimeoutError(
-            f"{self.deployment_name} deployment not ready after {timeout} seconds"
-        )
 
     def create_synthesis_job(
         self,
@@ -416,19 +356,13 @@ class SafeSynthesizerResource(ConfigurableResource):
         run_id: str,
         config: SafeSynthConfig | None = None,
     ) -> tuple[list[dict[str, Any]], SafeSynthEvaluationResult]:
-        """Run full synthesis pipeline with automatic GPU orchestration.
+        """Run full synthesis pipeline via always-on Safe Synthesizer service.
 
-        This method automatically:
-        1. Scales up the safe-synth deployment (0 -> 1 replica)
-        2. Waits for the service to be ready (KAI preempts nim-llm)
-        3. Runs the synthesis via API
-        4. Scales down the deployment (1 -> 0 replica)
-        5. nim-llm automatically restarts
+        Safe Synthesizer runs always-on alongside nim-llm via KAI fractional
+        GPU allocation. No manual scaling needed.
 
         If use_mock_fallback is True and the service is unavailable (local dev),
         generates mock synthetic data instead.
-
-        No manual intervention required!
 
         Args:
             input_data: Input data records.
@@ -438,32 +372,10 @@ class SafeSynthesizerResource(ConfigurableResource):
         Returns:
             Tuple of (synthetic_data, evaluation_report).
         """
-        # Check if already running
-        already_running = self.health_check()
-        scaled_up = False
+        if not self.health_check() and self.use_mock_fallback:
+            return self._generate_mock_synthetic_data(input_data, run_id)
 
-        # If service not available and mock fallback enabled, use mock
-        if not already_running and self.use_mock_fallback:
-            # Try to check if Kubernetes is available for scaling
-            try:
-                self._scale_deployment(replicas=1)
-                scaled_up = True  # Track that we already scaled up
-            except Exception:
-                # Kubernetes not available (local dev) - use mock synthesis
-                return self._generate_mock_synthetic_data(input_data, run_id)
-
-        if not already_running:
-            # Scale up deployment - KAI will preempt nim-llm
-            if not scaled_up:
-                self._scale_deployment(replicas=1)
-            self._wait_for_ready(timeout=600)  # 10 min for model loading
-
-        try:
-            return self._synthesize_via_api(input_data, config, run_id)
-        finally:
-            if not already_running:
-                # Scale down - nim-llm will auto-restart
-                self._scale_deployment(replicas=0)
+        return self._synthesize_via_api(input_data, config, run_id)
 
     def _ensure_hf_dataset_exists(self) -> str:
         """Ensure HuggingFace-compatible dataset exists in NDS.
@@ -667,6 +579,8 @@ size {file_size}
             "training": {
                 # RoPE scaling for longer text fields (summaries ~1200 chars)
                 "rope_scaling_factor": 6,
+                # Limit VRAM usage to ~35GB on H200 so nim-llm can coexist
+                "max_vram_fraction": 0.25,
             },
             "generation": {
                 "num_records": len(data),

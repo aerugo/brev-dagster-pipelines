@@ -312,6 +312,7 @@ def synthetic_summaries(
         context: Dagster execution context for logging.
         enriched_data_for_synthesis: Enriched speeches from LakeFS (with classifications).
         safe_synth: Safe Synthesizer resource for privacy-preserving synthesis.
+        k8s_scaler: Kubernetes scaler to manage GPU resources.
 
     Returns:
         Tuple of (synthetic metadata+summary DataFrame, evaluation report).

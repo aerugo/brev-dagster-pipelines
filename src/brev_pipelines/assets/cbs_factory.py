@@ -213,12 +213,41 @@ def build_cbs_assets(*, is_trial: bool) -> Sequence[dg.AssetsDefinition]:
         return df
 
     @dg.asset(
+        name="ensure_nim_reasoning",
+        key_prefix=key_prefix,
+        description="Scale up nim-reasoning and wait for readiness before LLM steps",
+        group_name=group_name,
+        deps=[dg.AssetDep(_key("cleaned_speeches"))],
+        metadata={
+            "layer": "orchestration",
+            "gpu_orchestration": "dagster-managed k8s scaling",
+            "is_trial": str(is_trial),
+        },
+    )
+    def ensure_nim_reasoning(
+        context: dg.AssetExecutionContext,
+        k8s_scaler: K8sScalerResource,
+    ) -> None:
+        """Scale up nim-reasoning and wait for readiness.
+
+        Runs upstream of speech_classification and speech_summaries to ensure
+        nim-reasoning is ready before either LLM step starts. Prevents race
+        conditions when both steps try to scale concurrently.
+
+        Args:
+            context: Dagster execution context for logging.
+            k8s_scaler: Kubernetes scaler to manage GPU resources.
+        """
+        _ensure_nim_reasoning_ready(context, k8s_scaler)
+
+    @dg.asset(
         name="speech_classification",
         key_prefix=key_prefix,
         description="Multi-dimensional speech classification using GPT-OSS 120B",
         group_name=group_name,
         io_manager_key=io_manager_key,
         ins={"cleaned_speeches": dg.AssetIn(key=_key("cleaned_speeches"))},
+        deps=[dg.AssetDep(_key("ensure_nim_reasoning"))],
         metadata={
             "layer": "enriched",
             "uses_gpu": "true",
@@ -231,10 +260,8 @@ def build_cbs_assets(*, is_trial: bool) -> Sequence[dg.AssetsDefinition]:
         cleaned_speeches: pl.DataFrame,
         nim_reasoning: NIMResource,
         minio: MinIOResource,
-        k8s_scaler: K8sScalerResource,
     ) -> pl.DataFrame:
         """Classify speeches on multiple dimensions using GPT-OSS 120B."""
-        _ensure_nim_reasoning_ready(context, k8s_scaler)
 
         df = cleaned_speeches
 
@@ -356,6 +383,7 @@ def build_cbs_assets(*, is_trial: bool) -> Sequence[dg.AssetsDefinition]:
         group_name=group_name,
         io_manager_key=io_manager_key,
         ins={"cleaned_speeches": dg.AssetIn(key=_key("cleaned_speeches"))},
+        deps=[dg.AssetDep(_key("ensure_nim_reasoning"))],
         metadata={
             "layer": "enriched",
             "uses_gpu": "true",
@@ -368,10 +396,8 @@ def build_cbs_assets(*, is_trial: bool) -> Sequence[dg.AssetsDefinition]:
         cleaned_speeches: pl.DataFrame,
         nim_reasoning: NIMResource,
         minio: MinIOResource,
-        k8s_scaler: K8sScalerResource,
     ) -> pl.DataFrame:
         """Generate bullet-point summaries of central bank speeches."""
-        _ensure_nim_reasoning_ready(context, k8s_scaler)
 
         df = cleaned_speeches
 
@@ -818,6 +844,7 @@ def build_cbs_assets(*, is_trial: bool) -> Sequence[dg.AssetsDefinition]:
     return [
         raw_speeches,
         cleaned_speeches,
+        ensure_nim_reasoning,
         speech_classification,
         speech_summaries,
         speech_embeddings,

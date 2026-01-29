@@ -655,12 +655,10 @@ size {file_size}
         config: SafeSynthConfig | None = None,
         run_id: str | None = None,
     ) -> tuple[list[dict[str, Any]], SafeSynthEvaluationResult]:
-        """Synthesize data via the NeMo Microservices SDK.
+        """Synthesize data via the NeMo Microservices SDK builder pattern.
 
-        Uses the official nemo_microservices SDK (client.beta.safe_synthesizer)
-        for job creation, status polling, and result download. Data upload to
-        NDS still uses our manual Git LFS implementation since the SDK requires
-        a pre-existing HF dataset URL.
+        Uses SafeSynthesizerJobBuilder from the official SDK which handles
+        data upload, job creation, polling, and result download internally.
 
         Args:
             data: Input data records.
@@ -670,118 +668,68 @@ size {file_size}
         Returns:
             Tuple of (synthetic_data, evaluation_report).
         """
-        import io
+        import tempfile
         import uuid
 
         import pandas as pd
+        from nemo_microservices.beta.safe_synthesizer.sdk.job_builder import (
+            SafeSynthesizerJobBuilder,
+        )
 
         # Generate run ID if not provided
         if run_id is None:
             run_id = str(uuid.uuid4())[:8]
 
-        # Upload data to NDS (SDK needs an HF dataset URL)
-        data_source = self._upload_to_nds(data, run_id)
-
-        # Build config using SDK defaults — no undocumented params
-        synth_config: dict[str, Any] = {
-            "enable_synthesis": True,
-            "enable_replace_pii": config.get("piiReplacement", True) if config else True,
-            "evaluation": {
-                "enabled": True,
-            },
-            "training": {
-                "rope_scaling_factor": "auto",
-            },
-            "generation": {
-                "num_records": len(data),
-            },
-        }
-
-        # Add data config (e.g., holdout=0 for small datasets)
-        data_config = config.get("data") if config else None
-        if data_config is not None:
-            synth_config["data"] = data_config
-
-        # Add differential privacy only if explicitly requested
-        epsilon = config.get("epsilon") if config else None
-        if epsilon is not None:
-            synth_config["privacy"] = {
-                "dp_enabled": True,
-                "epsilon": epsilon,
-                "delta": config.get("delta", "auto") if config else "auto",
-            }
-
-        # Create job via SDK
         client = self._get_sdk_client()
-        job = client.beta.safe_synthesizer.jobs.create(
-            name=f"dagster-synth-{run_id}",
-            spec={
-                "data_source": data_source,
-                "config": synth_config,
-            },
+        df = pd.DataFrame(data)
+
+        # Build job using SDK builder pattern (matches official tutorial)
+        builder = SafeSynthesizerJobBuilder(client)
+        builder = builder.with_data_source(df)
+        builder = builder.with_datastore({
+            "endpoint": self.nds_endpoint,
+        })
+        builder = builder.with_replace_pii()
+        builder = builder.with_generate({"num_records": len(data)})
+        builder = builder.synthesize()
+
+        job = builder.create_job(name=f"dagster-synth-{run_id}")
+
+        # Wait for completion (SDK handles polling internally)
+        job.wait_for_completion(
+            poll_interval=self.poll_interval,
+            verbose=False,
         )
-        job_id = job.id
 
-        # Poll for completion via SDK
-        start_time = time.time()
-        while time.time() - start_time < self.max_wait_time:
-            status_resp = client.beta.safe_synthesizer.jobs.get_status(job_id)
-            job_status = status_resp.status
-
-            if job_status == "completed":
-                break
-            elif job_status in ("error", "cancelled"):
-                error_details = getattr(status_resp, "error_details", None) or {}
-                raise SafeSynthJobFailedError(
-                    job_id, f"Job failed with status {job_status}: {error_details}"
-                )
-
-            time.sleep(self.poll_interval)
-        else:
-            raise SafeSynthTimeoutError(
-                f"Job {job_id} did not complete in {self.max_wait_time} seconds"
+        status = job.fetch_status()
+        if status != "completed":
+            raise SafeSynthJobFailedError(
+                job.job_id, f"Job finished with status: {status}"
             )
 
-        # Download results via SDK
-        results = client.beta.safe_synthesizer.jobs.results
-
-        # Synthetic data (binary response — format may be parquet or CSV)
-        synth_binary = results.synthetic_data.download(job_id)
-        raw_bytes = synth_binary.read()
-        buf = io.BytesIO(raw_bytes)
-        # Detect format: parquet files start with magic bytes b'PAR1'
-        if raw_bytes[:4] == b"PAR1":
-            synth_df = pd.read_parquet(buf)
-        else:
-            synth_df = pd.read_csv(buf)
+        # Fetch results via SDK (returns DataFrame directly)
+        synth_df = job.fetch_data()
         synthetic_data: list[dict[str, Any]] = synth_df.to_dict("records")
 
-        # Evaluation summary (typed response)
-        summary_obj = results.summary.download(job_id)
-        # Convert SDK object to dict for uniform access
-        summary: dict[str, Any] = {}
-        for field in (
-            "membership_inference_protection_score",
-            "attribute_inference_protection_score",
-            "data_privacy_score",
-            "synthetic_data_quality_score",
-        ):
-            summary[field] = getattr(summary_obj, field, None)
+        # Fetch evaluation summary
+        summary = job.fetch_summary()
 
-        # HTML evaluation report (optional)
+        # Save HTML report to temp file and read bytes
         html_report_bytes: bytes | None = None
         try:
-            report_binary = results.evaluation_report.download(job_id)
-            html_report_bytes = report_binary.read()
+            with tempfile.NamedTemporaryFile(suffix=".html", delete=True) as tmp:
+                job.save_report(tmp.name)
+                tmp.seek(0)
+                html_report_bytes = tmp.read()
         except Exception:
             pass
 
         evaluation: SafeSynthEvaluationResult = {
-            "job_id": job_id,
-            "mia_score": summary.get("membership_inference_protection_score") or 0.0,
-            "aia_score": summary.get("attribute_inference_protection_score") or 0.0,
-            "privacy_passed": (summary.get("data_privacy_score") or 0) > 0.7,
-            "quality_score": summary.get("synthetic_data_quality_score") or 0.0,
+            "job_id": job.job_id,
+            "mia_score": getattr(summary, "membership_inference_protection_score", 0.0) or 0.0,
+            "aia_score": getattr(summary, "attribute_inference_protection_score", 0.0) or 0.0,
+            "privacy_passed": (getattr(summary, "data_privacy_score", 0) or 0) > 0.7,
+            "quality_score": getattr(summary, "synthetic_data_quality_score", 0.0) or 0.0,
             "html_report_bytes": html_report_bytes,
         }
 

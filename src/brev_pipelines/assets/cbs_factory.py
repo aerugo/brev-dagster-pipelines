@@ -262,7 +262,6 @@ def build_cbs_assets(*, is_trial: bool) -> Sequence[dg.AssetsDefinition]:
         minio: MinIOResource,
     ) -> pl.DataFrame:
         """Classify speeches on multiple dimensions using GPT-OSS 120B."""
-
         df = cleaned_speeches
 
         checkpoint_mgr = LLMCheckpointManager(
@@ -398,7 +397,6 @@ def build_cbs_assets(*, is_trial: bool) -> Sequence[dg.AssetsDefinition]:
         minio: MinIOResource,
     ) -> pl.DataFrame:
         """Generate bullet-point summaries of central bank speeches."""
-
         df = cleaned_speeches
 
         checkpoint_mgr = LLMCheckpointManager(

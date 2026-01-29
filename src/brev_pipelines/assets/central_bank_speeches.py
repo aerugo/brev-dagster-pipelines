@@ -52,8 +52,6 @@ from brev_pipelines.types import (
     WeaviatePropertyDef,
 )
 
-
-
 # Collection schema for Weaviate
 SPEECHES_SCHEMA: list[WeaviatePropertyDef] = [
     WeaviatePropertyDef(name="reference", type="text", description="Unique identifier from source"),
@@ -469,7 +467,6 @@ def speech_classification(
     Returns:
         DataFrame with classification columns added.
     """
-
     df = cleaned_speeches
 
     # Create checkpoint manager
@@ -718,7 +715,6 @@ def speech_summaries(
     Returns:
         DataFrame with reference and summary columns.
     """
-
     df = cleaned_speeches
 
     # Create checkpoint manager

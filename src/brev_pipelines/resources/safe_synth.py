@@ -119,16 +119,20 @@ class SafeSynthesizerResource(ConfigurableResource):
         return token
 
     def _raise_for_nds_status(self, response: requests.Response) -> None:
-        """Raise retryable SafeSynthServerError for NDS 5xx errors.
+        """Raise retryable SafeSynthServerError for NDS auth and server errors.
 
-        Converts HTTP 5xx errors from NDS (Gitea) into SafeSynthServerError,
+        Converts HTTP 401/403/5xx errors from NDS (Gitea) into SafeSynthServerError,
         which is in RETRYABLE_ERRORS and will be retried by retry_safe_synth_call.
-        This handles transient NDS failures (e.g., must-change-password bug after pod restart).
+        This handles transient NDS failures (e.g., must-change-password bug after pod
+        restart invalidates API tokens with 403).
         """
         try:
             response.raise_for_status()
         except requests.exceptions.HTTPError as e:
-            if e.response is not None and e.response.status_code >= 500:
+            if e.response is not None and (
+                e.response.status_code in (401, 403)
+                or e.response.status_code >= 500
+            ):
                 import logging
 
                 logger = logging.getLogger(__name__)

@@ -17,11 +17,10 @@ The synthetic dataset contains summaries (not full text) because:
 
 Pipeline is DECOUPLED from the ETL pipeline - loads enriched data from LakeFS.
 
-GPU Orchestration (Automatic via KAI):
-1. Safe Synthesizer runs with 'batch-high' priority (130)
-2. KAI preempts NIM (priority 125) to free the GPU
-3. After Safe Synth completes, NIM Deployment restarts its pod
-4. No manual kubectl commands required!
+GPU Orchestration (Dagster-managed K8s scaling):
+1. synthetic_summaries scales down nim-reasoning, scales up safe-synth
+2. Pipeline runs synthesis, embeddings, indexing
+3. synthetic_pipeline_cleanup scales down safe-synth, restores nim-reasoning
 """
 
 import io
@@ -34,6 +33,7 @@ import polars as pl
 
 from brev_pipelines.config import PipelineConfig
 from brev_pipelines.io_managers.checkpoint import LLMCheckpointManager
+from brev_pipelines.resources.k8s_scaler import K8sScalerResource
 from brev_pipelines.resources.lakefs import (
     LakeFSConnectionError,
     LakeFSError,
@@ -262,13 +262,14 @@ def _validate_input_data_quality(
     metadata={
         "layer": "synthetic",
         "uses_gpu": "true",
-        "gpu_orchestration": "KAI priority-based preemption",
+        "gpu_orchestration": "dagster-managed k8s scaling",
     },
 )
 def synthetic_summaries(
     context: dg.AssetExecutionContext,
     enriched_data_for_synthesis: pl.DataFrame,
     safe_synth: SafeSynthesizerResource,
+    k8s_scaler: K8sScalerResource,
 ) -> tuple[pl.DataFrame, dict[str, Any]]:
     """Generate synthetic speech metadata + summaries using Safe Synthesizer.
 
@@ -302,10 +303,10 @@ def synthetic_summaries(
     - Full speeches are ~20000+ chars - way too long for TinyLlama
     - The synthetic dataset contains summaries only (no full text)
 
-    GPU orchestration is handled automatically by KAI Scheduler:
-    - Safe Synthesizer job runs with 'batch-high' priority (130)
-    - KAI preempts NIM (priority 125) to free the GPU
-    - After job completion, NIM Deployment restarts automatically
+    GPU orchestration is handled by Dagster K8s scaling:
+    - Scales nim-reasoning to 0 to free the GPU
+    - Scales safe-synth to 1 and waits for ready
+    - After pipeline completes, synthetic_pipeline_cleanup reverses this
 
     Args:
         context: Dagster execution context for logging.
@@ -318,9 +319,24 @@ def synthetic_summaries(
     df = enriched_data_for_synthesis
     run_id = context.run_id or datetime.now(UTC).strftime("%Y%m%d%H%M%S")
 
-    context.log.info("Starting synthetic data generation with KAI GPU orchestration...")
+    # GPU orchestration: scale down nim-reasoning, then scale up safe-synth
+    context.log.info("Scaling down nim-reasoning to free GPU for safe-synth...")
+    k8s_scaler.scale(
+        deployment="nim-reasoning",
+        namespace="nvidia-ai",
+        replicas=0,
+        wait_ready=False,  # scale(replicas=0) always waits for scale-down
+    )
+    context.log.info("nim-reasoning scaled down. Scaling up safe-synth...")
+    k8s_scaler.scale(
+        deployment="nvidia-safe-synth-safe-synthesizer",
+        namespace="nvidia-ai",
+        replicas=1,
+        wait_ready=True,
+    )
+    context.log.info("safe-synth is ready. Starting synthesis.")
+
     context.log.info("Training on METADATA + CLASSIFICATIONS + COMPACT SUMMARIES")
-    context.log.info("KAI Scheduler will automatically preempt NIM to free the GPU")
 
     # Columns for synthesis - METADATA + CLASSIFICATIONS + COMPACT SUMMARY
     # Compact summaries (~1000 chars) capture semantic nuance beyond numeric classifications.
@@ -441,7 +457,7 @@ def synthetic_summaries(
         "privacy_passed": evaluation.get("privacy_passed", False),
         "job_id": evaluation.get("job_id", ""),
         "generated_at": datetime.now(UTC).isoformat(),
-        "gpu_orchestration": "KAI priority-based preemption",
+        "gpu_orchestration": "dagster-managed k8s scaling",
         "synthesis_type": "metadata-classification-summary-based",
         "synthesis_columns": available_columns,
         "includes_summary": "summary" in available_columns,
@@ -1159,6 +1175,62 @@ def synthetic_embeddings_snapshot(
     }
 
 
+@dg.asset(
+    description="Cleanup: scale down safe-synth, restore nim-reasoning after synthetic pipeline",
+    group_name="synthetic_speeches",
+    metadata={
+        "layer": "cleanup",
+        "gpu_orchestration": "dagster-managed k8s scaling",
+    },
+)
+def synthetic_pipeline_cleanup(
+    context: dg.AssetExecutionContext,
+    synthetic_data_product: dict[str, Any],
+    synthetic_weaviate_index: dict[str, Any],
+    k8s_scaler: K8sScalerResource,
+) -> dict[str, Any]:
+    """Scale down safe-synth and restore nim-reasoning after synthetic pipeline completes.
+
+    Depends on all terminal assets (synthetic_data_product and synthetic_weaviate_index)
+    to ensure cleanup only runs after the entire pipeline finishes. Reverses the GPU
+    orchestration done by synthetic_summaries.
+
+    Args:
+        context: Dagster execution context for logging.
+        synthetic_data_product: Terminal asset output (ensures completion).
+        synthetic_weaviate_index: Terminal asset output (ensures completion).
+        k8s_scaler: Kubernetes scaler to manage GPU resources.
+
+    Returns:
+        Dictionary with cleanup metadata.
+    """
+    del synthetic_data_product  # Unused, exists only to enforce dependency
+    del synthetic_weaviate_index  # Unused, exists only to enforce dependency
+
+    context.log.info("Scaling down safe-synth after synthetic pipeline completion")
+    k8s_scaler.scale(
+        deployment="nvidia-safe-synth-safe-synthesizer",
+        namespace="nvidia-ai",
+        replicas=0,
+        wait_ready=False,  # scale(replicas=0) always waits for scale-down
+    )
+
+    context.log.info("safe-synth scaled down. Restoring nim-reasoning...")
+    k8s_scaler.scale(
+        deployment="nim-reasoning",
+        namespace="nvidia-ai",
+        replicas=1,
+        wait_ready=True,
+    )
+    context.log.info("nim-reasoning restored and ready")
+
+    return {
+        "safe_synth_replicas": 0,
+        "nim_reasoning_replicas": 1,
+        "cleanup_completed": True,
+    }
+
+
 # Export all synthetic speech assets (summary-based, no full text expansion)
 synthetic_speeches_assets = [
     enriched_data_for_synthesis,
@@ -1170,4 +1242,6 @@ synthetic_speeches_assets = [
     # Intermediate snapshots for debugging/recovery
     synthetic_summaries_snapshot,
     synthetic_embeddings_snapshot,
+    # Cleanup: scale down safe-synth, restore nim-reasoning
+    synthetic_pipeline_cleanup,
 ]

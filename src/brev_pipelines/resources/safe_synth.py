@@ -25,6 +25,7 @@ from pydantic import Field
 from brev_pipelines.resources.safe_synth_retry import (
     SafeSynthError,
     SafeSynthJobFailedError,
+    SafeSynthServerError,
     SafeSynthTimeoutError,
 )
 from brev_pipelines.types import SafeSynthConfig, SafeSynthEvaluationResult, SafeSynthJobStatus
@@ -116,6 +117,30 @@ class SafeSynthesizerResource(ConfigurableResource):
                 "Ensure the nds-credentials secret is mounted."
             )
         return token
+
+    def _raise_for_nds_status(self, response: requests.Response) -> None:
+        """Raise retryable SafeSynthServerError for NDS 5xx errors.
+
+        Converts HTTP 5xx errors from NDS (Gitea) into SafeSynthServerError,
+        which is in RETRYABLE_ERRORS and will be retried by retry_safe_synth_call.
+        This handles transient NDS failures (e.g., must-change-password bug after pod restart).
+        """
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code >= 500:
+                import logging
+
+                logger = logging.getLogger(__name__)
+                logger.warning(
+                    "NDS returned %d: %s",
+                    e.response.status_code,
+                    e.response.text[:500],
+                )
+                raise SafeSynthServerError(
+                    e.response.status_code, e.response.text
+                ) from e
+            raise
 
     def _get_k8s_batch_client(self) -> K8sBatchV1Api:
         """Get Kubernetes batch API client."""
@@ -396,7 +421,7 @@ class SafeSynthesizerResource(ConfigurableResource):
             response = requests.post(
                 create_url,
                 json=create_payload,
-                headers={"Authorization": f"Bearer {self.nds_token}"},
+                headers={"Authorization": f"Bearer {self._get_nds_token()}"},
                 timeout=30,
             )
             if response.status_code == 200:
@@ -461,11 +486,11 @@ class SafeSynthesizerResource(ConfigurableResource):
             headers={
                 "Accept": "application/vnd.git-lfs+json",
                 "Content-Type": "application/vnd.git-lfs+json",
-                "Authorization": f"token {self.nds_token}",
+                "Authorization": f"token {self._get_nds_token()}",
             },
             timeout=30,
         )
-        batch_response.raise_for_status()
+        self._raise_for_nds_status(batch_response)
         batch_result = batch_response.json()
 
         # Step 2: Upload file via LFS (if upload action is provided)
@@ -483,7 +508,7 @@ class SafeSynthesizerResource(ConfigurableResource):
                 headers=upload_headers,
                 timeout=120,
             )
-            upload_response.raise_for_status()
+            self._raise_for_nds_status(upload_response)
 
             # Step 3: Verify upload if endpoint provided
             verify_info = actions.get("verify")
@@ -532,7 +557,7 @@ size {file_size}
             headers={"Authorization": f"token {self._get_nds_token()}"},
             timeout=30,
         )
-        commit_response.raise_for_status()
+        self._raise_for_nds_status(commit_response)
 
         # Return HuggingFace-style URL as expected by Safe Synthesizer
         return f"hf://datasets/{repo_id}/{filename}"

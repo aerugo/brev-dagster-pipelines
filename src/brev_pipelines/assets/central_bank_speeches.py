@@ -322,14 +322,6 @@ def speech_embeddings(
         replicas=0,
         wait_ready=False,
     )
-    # Restore safe-synth now that nim-reasoning is down
-    context.log.info("Restoring safe-synth after nim-reasoning scale-down")
-    k8s_scaler.scale(
-        deployment="nvidia-safe-synth-safe-synthesizer",
-        namespace="nvidia-ai",
-        replicas=1,
-        wait_ready=False,
-    )
     context.log.info("nim-reasoning scaled down, starting embedding generation")
 
     checkpoint_mgr = LLMCheckpointManager(

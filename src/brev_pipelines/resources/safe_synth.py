@@ -407,15 +407,23 @@ class SafeSynthesizerResource(ConfigurableResource):
         return self._synthesize_via_api(input_data, config, run_id)
 
     def _ensure_hf_dataset_exists(self) -> str:
-        """Ensure HuggingFace-compatible dataset exists in NDS.
+        """Ensure HuggingFace-compatible dataset exists and is functional in NDS.
 
-        Creates the dataset via HF API if it doesn't exist.
+        Creates the dataset via HF API if it doesn't exist. Also verifies the
+        underlying Git repo is accessible (not just present in the DB), handling
+        the case where the data-store PVC was recreated but PostgreSQL retains
+        stale repo metadata.
 
         Returns:
             The dataset repo ID (e.g., 'default/speeches-data').
         """
-        # Extract repo name from nds_repo (e.g., 'admin/central-bank-speeches' -> 'speeches-data')
+        import logging
+
+        logger = logging.getLogger(__name__)
+
         repo_name = self.nds_repo.split("/")[-1]
+        repo_id = f"default/{repo_name}"
+        token = self._get_nds_token()
 
         # Try to create dataset via HF API
         create_url = f"{self.nds_endpoint}/v1/hf/api/repos/create"
@@ -425,24 +433,89 @@ class SafeSynthesizerResource(ConfigurableResource):
             response = requests.post(
                 create_url,
                 json=create_payload,
-                headers={"Authorization": f"Bearer {self._get_nds_token()}"},
+                headers={"Authorization": f"Bearer {token}"},
                 timeout=30,
             )
             if response.status_code == 200:
                 result: dict[str, str] = response.json()
-                # Returns {'url': 'datasets/default/repo-name'}
                 url: str = result.get("url", f"default/{repo_name}")
                 return url.replace("datasets/", "")
             elif response.status_code == 409:
-                # Already exists
-                return f"default/{repo_name}"
+                # DB says repo exists — verify Git directory is functional
+                if self._verify_repo_functional(repo_id, token):
+                    return repo_id
+                # Stale repo: DB has metadata but Git dir is missing
+                logger.warning(
+                    "NDS repo %s exists in DB but Git directory is broken. "
+                    "Deleting and recreating.",
+                    repo_id,
+                )
+                self._delete_nds_repo(repo_id, token)
+                # Retry creation
+                retry_resp = requests.post(
+                    create_url,
+                    json=create_payload,
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=30,
+                )
+                retry_resp.raise_for_status()
+                return repo_id
             else:
                 response.raise_for_status()
         except requests.exceptions.HTTPError:
-            # Assume it exists if we get an error
             pass
 
-        return f"default/{repo_name}"
+        return repo_id
+
+    def _verify_repo_functional(self, repo_id: str, token: str) -> bool:
+        """Check if a NDS repo's Git directory is actually accessible.
+
+        The Gitea API may report a repo as existing (in PostgreSQL) even when
+        the underlying bare Git repository is missing from disk (e.g., after
+        PVC recreation). This verifies the repo can serve Git operations.
+
+        Args:
+            repo_id: Repository ID (e.g., 'default/central-bank-speeches').
+            token: NDS API token.
+
+        Returns:
+            True if the repo is functional, False if Git dir is missing.
+        """
+        try:
+            resp = requests.get(
+                f"{self.nds_endpoint}/api/v1/repos/{repo_id}/git/refs",
+                headers={"Authorization": f"token {token}"},
+                timeout=10,
+            )
+            # 500 = broken Git dir; 200 or 404 (empty repo) = functional
+            return resp.status_code != 500
+        except Exception:
+            return True  # Network error — assume functional, let upload fail with retries
+
+    def _delete_nds_repo(self, repo_id: str, token: str) -> None:
+        """Delete a stale NDS repo so it can be recreated with a fresh Git dir.
+
+        Args:
+            repo_id: Repository ID (e.g., 'default/central-bank-speeches').
+            token: NDS API token.
+        """
+        import logging
+
+        logger = logging.getLogger(__name__)
+        resp = requests.delete(
+            f"{self.nds_endpoint}/api/v1/repos/{repo_id}",
+            headers={"Authorization": f"token {token}"},
+            timeout=30,
+        )
+        if resp.status_code in (200, 204):
+            logger.info("Deleted stale NDS repo %s", repo_id)
+        else:
+            logger.error(
+                "Failed to delete stale NDS repo %s: %d %s",
+                repo_id,
+                resp.status_code,
+                resp.text[:200],
+            )
 
     def _upload_to_nds(self, data: list[dict[str, Any]], run_id: str) -> str:
         """Upload data to NDS (NeMo Data Store) for Safe Synthesizer.

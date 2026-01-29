@@ -639,19 +639,28 @@ size {file_size}
         # Return HuggingFace-style URL as expected by Safe Synthesizer
         return f"hf://datasets/{repo_id}/{filename}"
 
+    def _get_sdk_client(self) -> Any:
+        """Get NeMo Microservices SDK client.
+
+        Returns:
+            NeMoMicroservices client configured for our Safe Synthesizer endpoint.
+        """
+        from nemo_microservices import NeMoMicroservices
+
+        return NeMoMicroservices(base_url=self.service_endpoint)
+
     def _synthesize_via_api(
         self,
         data: list[dict[str, Any]],
         config: SafeSynthConfig | None = None,
         run_id: str | None = None,
     ) -> tuple[list[dict[str, Any]], SafeSynthEvaluationResult]:
-        """Synthesize data via the Safe Synthesizer API.
+        """Synthesize data via the NeMo Microservices SDK.
 
-        This method:
-        1. Uploads data to NDS (HuggingFace-compatible data store)
-        2. Creates a Safe Synthesizer job via /v1beta1/safe-synthesizer/jobs
-        3. Polls for completion
-        4. Downloads and returns synthetic data
+        Uses the official nemo_microservices SDK (client.beta.safe_synthesizer)
+        for job creation, status polling, and result download. Data upload to
+        NDS still uses our manual Git LFS implementation since the SDK requires
+        a pre-existing HF dataset URL.
 
         Args:
             data: Input data records.
@@ -661,17 +670,19 @@ size {file_size}
         Returns:
             Tuple of (synthetic_data, evaluation_report).
         """
+        import io
         import uuid
+
+        import pandas as pd
 
         # Generate run ID if not provided
         if run_id is None:
             run_id = str(uuid.uuid4())[:8]
 
-        # Upload data to NDS
+        # Upload data to NDS (SDK needs an HF dataset URL)
         data_source = self._upload_to_nds(data, run_id)
 
-        # Build Safe Synthesizer job config - use defaults like the notebook example
-        # See: https://docs.nvidia.com/nemo/microservices/latest/generate-private-synthetic-data/tutorials/safe-synthesizer-101.html
+        # Build config using SDK defaults — no undocumented params
         synth_config: dict[str, Any] = {
             "enable_synthesis": True,
             "enable_replace_pii": config.get("piiReplacement", True) if config else True,
@@ -679,16 +690,10 @@ size {file_size}
                 "enabled": True,
             },
             "training": {
-                # RoPE scaling for longer text fields (summaries ~1200 chars)
-                "rope_scaling_factor": 6,
-                # Limit VRAM usage to ~35GB on H200 so nim-llm can coexist
-                "max_vram_fraction": 0.25,
+                "rope_scaling_factor": "auto",
             },
             "generation": {
                 "num_records": len(data),
-                # Use default structured generation (let Safe Synthesizer choose backend)
-                # This ensures valid JSON output format
-                "use_structured_generation": True,
             },
         }
 
@@ -698,7 +703,6 @@ size {file_size}
             synth_config["data"] = data_config
 
         # Add differential privacy only if explicitly requested
-        # DP adds noise that can cause underfitting - use higher epsilon (8-12) if needed
         epsilon = config.get("epsilon") if config else None
         if epsilon is not None:
             synth_config["privacy"] = {
@@ -707,96 +711,75 @@ size {file_size}
                 "delta": config.get("delta", "auto") if config else "auto",
             }
 
-        # Create job payload
-        payload = {
-            "name": f"dagster-synth-{run_id}",
-            "spec": {
+        # Create job via SDK
+        client = self._get_sdk_client()
+        job = client.beta.safe_synthesizer.jobs.create(
+            name=f"dagster-synth-{run_id}",
+            spec={
                 "data_source": data_source,
                 "config": synth_config,
             },
-        }
-
-        # Create job via Safe Synthesizer API v1beta1
-        response = requests.post(
-            f"{self.service_endpoint}/v1beta1/safe-synthesizer/jobs",
-            json=payload,
-            timeout=60,
         )
-        response.raise_for_status()
-        job_response = response.json()
-        job_id = job_response.get("id")
+        job_id = job.id
 
-        # Wait for completion
+        # Poll for completion via SDK
         start_time = time.time()
         while time.time() - start_time < self.max_wait_time:
-            status_response = requests.get(
-                f"{self.service_endpoint}/v1beta1/safe-synthesizer/jobs/{job_id}/status",
-                timeout=60,
-            )
-            status_response.raise_for_status()
-            status = status_response.json()
+            status_resp = client.beta.safe_synthesizer.jobs.get_status(job_id)
+            job_status = status_resp.status
 
-            job_status = status.get("status")
             if job_status == "completed":
-                # Download synthetic data
-                synth_response = requests.get(
-                    f"{self.service_endpoint}/v1beta1/safe-synthesizer/jobs/{job_id}/results/synthetic_data/download",
-                    timeout=120,
-                )
-                synth_response.raise_for_status()
-
-                # Parse parquet response
-                import io
-
-                import pandas as pd
-
-                synth_df = pd.read_parquet(io.BytesIO(synth_response.content))
-                synthetic_data: list[dict[str, Any]] = synth_df.to_dict("records")
-
-                # Get evaluation summary
-                summary_response = requests.get(
-                    f"{self.service_endpoint}/v1beta1/safe-synthesizer/jobs/{job_id}/results/summary/download",
-                    timeout=60,
-                )
-                summary = {}
-                if summary_response.status_code == 200:
-                    summary = summary_response.json()
-
-                # Get HTML evaluation report (contains SQS/DPS graphs and metrics)
-                html_report_bytes: bytes | None = None
-                try:
-                    report_response = requests.get(
-                        f"{self.service_endpoint}/v1beta1/safe-synthesizer/jobs/{job_id}/results/report/download",
-                        timeout=60,
-                    )
-                    if report_response.status_code == 200:
-                        html_report_bytes = report_response.content
-                except Exception:
-                    # HTML report is optional - don't fail if unavailable
-                    pass
-
-                evaluation: SafeSynthEvaluationResult = {
-                    "job_id": job_id,
-                    "mia_score": summary.get("membership_inference_protection_score") or 0.0,
-                    "aia_score": summary.get("attribute_inference_protection_score") or 0.0,
-                    "privacy_passed": (summary.get("data_privacy_score") or 0) > 0.7,
-                    "quality_score": summary.get("synthetic_data_quality_score") or 0.0,
-                    "html_report_bytes": html_report_bytes,
-                }
-
-                return synthetic_data, evaluation
-
+                break
             elif job_status in ("error", "cancelled"):
-                error_details = status.get("error_details", {})
+                error_details = getattr(status_resp, "error_details", None) or {}
                 raise SafeSynthJobFailedError(
                     job_id, f"Job failed with status {job_status}: {error_details}"
                 )
 
             time.sleep(self.poll_interval)
+        else:
+            raise SafeSynthTimeoutError(
+                f"Job {job_id} did not complete in {self.max_wait_time} seconds"
+            )
 
-        raise SafeSynthTimeoutError(
-            f"Job {job_id} did not complete in {self.max_wait_time} seconds"
-        )
+        # Download results via SDK
+        results = client.beta.safe_synthesizer.jobs.results
+
+        # Synthetic data (parquet binary response)
+        synth_binary = results.synthetic_data.download(job_id)
+        synth_df = pd.read_parquet(io.BytesIO(synth_binary.content))
+        synthetic_data: list[dict[str, Any]] = synth_df.to_dict("records")
+
+        # Evaluation summary (typed response)
+        summary_obj = results.summary.download(job_id)
+        # Convert SDK object to dict for uniform access
+        summary: dict[str, Any] = {}
+        for field in (
+            "membership_inference_protection_score",
+            "attribute_inference_protection_score",
+            "data_privacy_score",
+            "synthetic_data_quality_score",
+        ):
+            summary[field] = getattr(summary_obj, field, None)
+
+        # HTML evaluation report (optional)
+        html_report_bytes: bytes | None = None
+        try:
+            report_binary = results.evaluation_report.download(job_id)
+            html_report_bytes = report_binary.content
+        except Exception:
+            pass
+
+        evaluation: SafeSynthEvaluationResult = {
+            "job_id": job_id,
+            "mia_score": summary.get("membership_inference_protection_score") or 0.0,
+            "aia_score": summary.get("attribute_inference_protection_score") or 0.0,
+            "privacy_passed": (summary.get("data_privacy_score") or 0) > 0.7,
+            "quality_score": summary.get("synthetic_data_quality_score") or 0.0,
+            "html_report_bytes": html_report_bytes,
+        }
+
+        return synthetic_data, evaluation
 
     def health_check(self) -> bool:
         """Check if Safe Synthesizer service is healthy."""

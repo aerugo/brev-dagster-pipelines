@@ -70,12 +70,20 @@ class SafeSynthJobFailedError(SafeSynthError):
 
 
 # Retryable errors - server issues that may be transient
-RETRYABLE_ERRORS: tuple[type[Exception], ...] = (
+_BASE_RETRYABLE: tuple[type[Exception], ...] = (
     SafeSynthTimeoutError,
     SafeSynthServerError,
     ConnectionError,
     TimeoutError,
 )
+
+# Add NeMo SDK exceptions if available (SDK may not be installed in local dev)
+try:
+    from nemo_microservices import APIError, APIStatusError
+
+    RETRYABLE_ERRORS: tuple[type[Exception], ...] = (*_BASE_RETRYABLE, APIError, APIStatusError)
+except ImportError:
+    RETRYABLE_ERRORS = _BASE_RETRYABLE
 
 
 # =============================================================================

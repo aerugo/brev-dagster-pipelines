@@ -320,15 +320,22 @@ def synthetic_summaries(
     df = enriched_data_for_synthesis
     run_id = context.run_id or datetime.now(UTC).strftime("%Y%m%d%H%M%S")
 
-    # GPU orchestration: scale down nim-reasoning, then scale up safe-synth
-    context.log.info("Scaling down nim-reasoning to free GPU for safe-synth...")
+    # GPU orchestration: scale down nim-reasoning + nim-llm, then scale up safe-synth
+    # Safe Synth training needs full GPU — no max_vram_fraction constraint
+    context.log.info("Scaling down nim-reasoning and nim-llm to free GPU for safe-synth...")
     k8s_scaler.scale(
         deployment="nim-reasoning",
         namespace="nvidia-ai",
         replicas=0,
-        wait_ready=False,  # scale(replicas=0) always waits for scale-down
+        wait_ready=False,
     )
-    context.log.info("nim-reasoning scaled down. Scaling up safe-synth...")
+    k8s_scaler.scale(
+        deployment="nim-llm",
+        namespace="nvidia-ai",
+        replicas=0,
+        wait_ready=False,
+    )
+    context.log.info("GPU freed. Scaling up safe-synth...")
     k8s_scaler.scale(
         deployment="nvidia-safe-synth-safe-synthesizer",
         namespace="nvidia-ai",
@@ -1216,17 +1223,24 @@ def synthetic_pipeline_cleanup(
         wait_ready=False,  # scale(replicas=0) always waits for scale-down
     )
 
-    context.log.info("safe-synth scaled down. Restoring nim-reasoning...")
+    context.log.info("safe-synth scaled down. Restoring nim-llm and nim-reasoning...")
+    k8s_scaler.scale(
+        deployment="nim-llm",
+        namespace="nvidia-ai",
+        replicas=1,
+        wait_ready=True,
+    )
     k8s_scaler.scale(
         deployment="nim-reasoning",
         namespace="nvidia-ai",
         replicas=1,
         wait_ready=True,
     )
-    context.log.info("nim-reasoning restored and ready")
+    context.log.info("nim-llm and nim-reasoning restored and ready")
 
     return {
         "safe_synth_replicas": 0,
+        "nim_llm_replicas": 1,
         "nim_reasoning_replicas": 1,
         "cleanup_completed": True,
     }

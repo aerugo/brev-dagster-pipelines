@@ -19,7 +19,8 @@ dependencies = [
     "kagglehub[polars-datasets]>=0.3.0",
     "weaviate-client>=4.9.0",
     # Synthetic data pipeline dependencies
-    "kubernetes>=28.0.0",  # For KAI Job management
+    "kubernetes>=28.0.0", # For KAI Job management
+    "nemo-microservices>=1.5.0",
 ]
 
 [project.optional-dependencies]

@@ -747,7 +747,7 @@ size {file_size}
 
         # Synthetic data (parquet binary response)
         synth_binary = results.synthetic_data.download(job_id)
-        synth_df = pd.read_parquet(io.BytesIO(synth_binary.content))
+        synth_df = pd.read_parquet(io.BytesIO(synth_binary.read()))
         synthetic_data: list[dict[str, Any]] = synth_df.to_dict("records")
 
         # Evaluation summary (typed response)
@@ -766,7 +766,7 @@ size {file_size}
         html_report_bytes: bytes | None = None
         try:
             report_binary = results.evaluation_report.download(job_id)
-            html_report_bytes = report_binary.content
+            html_report_bytes = report_binary.read()
         except Exception:
             pass
 

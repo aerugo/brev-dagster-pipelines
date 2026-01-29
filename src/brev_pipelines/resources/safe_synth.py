@@ -745,9 +745,15 @@ size {file_size}
         # Download results via SDK
         results = client.beta.safe_synthesizer.jobs.results
 
-        # Synthetic data (parquet binary response)
+        # Synthetic data (binary response — format may be parquet or CSV)
         synth_binary = results.synthetic_data.download(job_id)
-        synth_df = pd.read_parquet(io.BytesIO(synth_binary.read()))
+        raw_bytes = synth_binary.read()
+        buf = io.BytesIO(raw_bytes)
+        # Detect format: parquet files start with magic bytes b'PAR1'
+        if raw_bytes[:4] == b"PAR1":
+            synth_df = pd.read_parquet(buf)
+        else:
+            synth_df = pd.read_csv(buf)
         synthetic_data: list[dict[str, Any]] = synth_df.to_dict("records")
 
         # Evaluation summary (typed response)

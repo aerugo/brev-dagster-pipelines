@@ -672,10 +672,12 @@ size {file_size}
         import tempfile
         import uuid
 
+        from nemo_microservices.beta.safe_synthesizer.config.parameters import (
+            SafeSynthesizerParameters,
+        )
         from nemo_microservices.beta.safe_synthesizer.sdk.job_builder import (
             SafeSynthesizerJob,
             SafeSynthesizerJobConfig,
-            SafeSynthesizerParameters,
         )
 
         # Generate run ID if not provided

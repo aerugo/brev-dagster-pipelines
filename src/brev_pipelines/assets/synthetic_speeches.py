@@ -476,6 +476,8 @@ def synthetic_summaries(
             "structured_generation_schema_method": "json",
             "holdout_disabled": num_records < 500,
         },
+        # Pass through HTML report bytes for validation step to store in LakeFS
+        "html_report_bytes": evaluation.get("html_report_bytes"),
     }
 
     context.log.info(

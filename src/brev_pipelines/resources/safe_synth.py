@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import requests
@@ -726,14 +727,21 @@ size {file_size}
         summary = job.fetch_summary()
 
         # Save HTML report to temp file and read bytes
+        # Note: save_report() writes to disk, so we must use delete=False
+        # and read the file after save_report() completes.
         html_report_bytes: bytes | None = None
+        tmp_path: str | None = None
         try:
-            with tempfile.NamedTemporaryFile(suffix=".html", delete=True) as tmp:
-                job.save_report(tmp.name)
-                tmp.seek(0)
-                html_report_bytes = tmp.read()
+            with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tmp:
+                tmp_path = tmp.name
+            job.save_report(tmp_path)
+            with open(tmp_path, "rb") as f:
+                html_report_bytes = f.read()
         except Exception:
             pass
+        finally:
+            if tmp_path:
+                Path(tmp_path).unlink(missing_ok=True)
 
         evaluation: SafeSynthEvaluationResult = {
             "job_id": job.job_id,

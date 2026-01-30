@@ -4,9 +4,9 @@ Generates privacy-preserving synthetic twin of the speeches dataset using
 NVIDIA Safe Synthesizer for metadata + classification + summary synthesis.
 
 What we synthesize:
-- Categorical metadata: date, central_bank, speaker, title
+- Categorical metadata: date, country, author, title
 - Classification scores: monetary_stance, trade_stance, economic_outlook (1-5 scales)
-- Binary flags: tariff_mention, is_governor
+- Binary flags: tariff_mention, is_gov
 - Compact summary: ~1000 char bullet-point summary with specific details
 
 The synthetic dataset contains summaries (not full text) because:
@@ -60,8 +60,8 @@ SYNTHETIC_SCHEMA: list[WeaviatePropertyDef] = [
         name="reference", type="text", description="Unique identifier (SYNTH-XXXXXX)"
     ),
     WeaviatePropertyDef(name="date", type="text", description="Speech date (ISO format)"),
-    WeaviatePropertyDef(name="central_bank", type="text", description="Issuing institution"),
-    WeaviatePropertyDef(name="speaker", type="text", description="Speaker name"),
+    WeaviatePropertyDef(name="country", type="text", description="Country"),
+    WeaviatePropertyDef(name="author", type="text", description="Speaker name"),
     WeaviatePropertyDef(name="title", type="text", description="Speech title"),
     WeaviatePropertyDef(
         name="summary", type="text", description="Compact summary (~1000 chars, synthesized)"
@@ -79,7 +79,7 @@ SYNTHETIC_SCHEMA: list[WeaviatePropertyDef] = [
         name="economic_outlook", type="int", description="1=very_negative to 5=very_positive"
     ),
     WeaviatePropertyDef(
-        name="is_governor", type="boolean", description="Speaker is central bank governor"
+        name="is_gov", type="boolean", description="Speaker is central bank governor"
     ),
     WeaviatePropertyDef(name="is_synthetic", type="boolean", description="Synthetic data marker"),
 ]
@@ -278,9 +278,9 @@ def synthetic_summaries(
     but our compact summaries (~1000 chars) fit within this budget.
 
     What we synthesize:
-    - Categorical metadata: date, central_bank, speaker, title
+    - Categorical metadata: date, country, author, title
     - Classification scores: monetary_stance, trade_stance, economic_outlook (1-5 scales)
-    - Binary flags: tariff_mention, is_governor
+    - Binary flags: tariff_mention, is_gov
     - Compact summary: ~1000 char bullet-point summary with specific details
 
     Why this works without underfitting:
@@ -352,15 +352,15 @@ def synthetic_summaries(
     synthesis_columns = [
         "reference",  # Unique identifier
         "date",  # Speech date
-        "central_bank",  # Institution name (short string)
-        "speaker",  # Speaker name (short string)
+        "country",  # Country (maps to central bank)
+        "author",  # Speaker name
         "title",  # Speech title (short string)
         # Classifications from ETL pipeline - capture overall stance numerically
         "monetary_stance",  # 1-5 scale (dovish to hawkish)
         "trade_stance",  # 1-5 scale (protectionist to globalist)
         "economic_outlook",  # 1-5 scale (negative to positive)
         "tariff_mention",  # Binary 0/1
-        "is_governor",  # Binary 0/1
+        "is_gov",  # Binary: is speaker a governor?
         # Compact summary - captures specific details beyond numeric classifications
         "summary",  # ~1000 chars, bullet-point format (fits in context)
         # EXCLUDED: "text" - full speech text, way too long (~20000+ chars)
@@ -917,15 +917,15 @@ def synthetic_weaviate_index(
             {
                 "reference": row["reference"],
                 "date": str(row.get("date", "")),
-                "central_bank": row.get("central_bank", "Unknown"),
-                "speaker": row.get("speaker", "Unknown"),
+                "country": row.get("country", "Unknown"),
+                "author": row.get("author", "Unknown"),
                 "title": row.get("title", "Untitled"),
                 "summary": (row.get("summary", "") or "")[:2000],
                 "monetary_stance": int(row.get("monetary_stance", 3)),
                 "trade_stance": int(row.get("trade_stance", 3)),
                 "tariff_mention": bool(row.get("tariff_mention", 0)),
                 "economic_outlook": int(row.get("economic_outlook", 3)),
-                "is_governor": bool(row.get("is_governor", False)),
+                "is_gov": bool(row.get("is_gov", False)),
                 "is_synthetic": True,
             }
         )

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import requests
@@ -670,7 +669,7 @@ size {file_size}
         Returns:
             Tuple of (synthetic_data, evaluation_report).
         """
-        import tempfile
+        import logging
         import uuid
 
         from nemo_microservices.beta.safe_synthesizer.config.parameters import (
@@ -726,22 +725,13 @@ size {file_size}
         # Fetch evaluation summary
         summary = job.fetch_summary()
 
-        # Save HTML report to temp file and read bytes
-        # Note: save_report() writes to disk, so we must use delete=False
-        # and read the file after save_report() completes.
+        # Fetch HTML report directly via SDK (avoids temp file issues)
         html_report_bytes: bytes | None = None
-        tmp_path: str | None = None
         try:
-            with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tmp:
-                tmp_path = tmp.name
-            job.save_report(tmp_path)
-            with open(tmp_path, "rb") as f:
-                html_report_bytes = f.read()
-        except Exception:
-            pass
-        finally:
-            if tmp_path:
-                Path(tmp_path).unlink(missing_ok=True)
+            report = job.fetch_report()
+            html_report_bytes = report.raw_html.encode("utf-8")
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Failed to fetch HTML evaluation report: %s", exc)
 
         evaluation: SafeSynthEvaluationResult = {
             "job_id": job.job_id,

@@ -655,10 +655,11 @@ size {file_size}
         config: SafeSynthConfig | None = None,
         run_id: str | None = None,
     ) -> tuple[list[dict[str, Any]], SafeSynthEvaluationResult]:
-        """Synthesize data via the NeMo Microservices SDK builder pattern.
+        """Synthesize data via NeMo SDK with Gitea-compatible NDS upload.
 
-        Uses SafeSynthesizerJobBuilder from the official SDK which handles
-        data upload, job creation, polling, and result download internally.
+        Uploads data to NDS via Gitea API (our NDS is Gitea-based, not HF Hub),
+        then uses the SDK's low-level jobs.create() and SafeSynthesizerJob for
+        polling and result download.
 
         Args:
             data: Input data records.
@@ -671,31 +672,39 @@ size {file_size}
         import tempfile
         import uuid
 
-        import pandas as pd
         from nemo_microservices.beta.safe_synthesizer.sdk.job_builder import (
-            SafeSynthesizerJobBuilder,
+            SafeSynthesizerJob,
+            SafeSynthesizerJobConfig,
+            SafeSynthesizerParameters,
         )
 
         # Generate run ID if not provided
         if run_id is None:
             run_id = str(uuid.uuid4())[:8]
 
+        # Step 1: Upload data to NDS via Gitea API (SDK assumes HF Hub, ours is Gitea)
+        data_source_url = self._upload_to_nds(data, run_id)
+
+        # Step 2: Build job config using SDK models
+        nss_params = SafeSynthesizerParameters(
+            enable_replace_pii=True,
+            enable_synthesis=True,
+            generate={"num_records": len(data)},
+        )
+        job_config = SafeSynthesizerJobConfig(
+            data_source=data_source_url,
+            config=nss_params,
+        )
+
+        # Step 3: Create job via SDK low-level API
         client = self._get_sdk_client()
-        df = pd.DataFrame(data)
+        response = client.beta.safe_synthesizer.jobs.create(
+            spec=job_config.model_dump(),
+            name=f"dagster-synth-{run_id}",
+        )
+        job = SafeSynthesizerJob(response.id, client)
 
-        # Build job using SDK builder pattern (matches official tutorial)
-        builder = SafeSynthesizerJobBuilder(client)
-        builder = builder.with_data_source(df)
-        builder = builder.with_datastore({
-            "endpoint": self.nds_endpoint,
-        })
-        builder = builder.with_replace_pii()
-        builder = builder.with_generate({"num_records": len(data)})
-        builder = builder.synthesize()
-
-        job = builder.create_job(name=f"dagster-synth-{run_id}")
-
-        # Wait for completion (SDK handles polling internally)
+        # Step 4: Wait for completion using SDK polling
         job.wait_for_completion(
             poll_interval=self.poll_interval,
             verbose=False,
@@ -707,7 +716,7 @@ size {file_size}
                 job.job_id, f"Job finished with status: {status}"
             )
 
-        # Fetch results via SDK (returns DataFrame directly)
+        # Step 5: Fetch results via SDK (returns DataFrame directly)
         synth_df = job.fetch_data()
         synthetic_data: list[dict[str, Any]] = synth_df.to_dict("records")
 

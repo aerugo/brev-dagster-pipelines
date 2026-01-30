@@ -46,15 +46,15 @@ class TestSyntheticSchema:
 
         assert "reference" in field_names
         assert "date" in field_names
-        assert "central_bank" in field_names
-        assert "speaker" in field_names
+        assert "country" in field_names
+        assert "author" in field_names
         assert "title" in field_names
         assert "summary" in field_names  # Summaries, not full text
         assert "monetary_stance" in field_names
         assert "trade_stance" in field_names
         assert "tariff_mention" in field_names
         assert "economic_outlook" in field_names
-        assert "is_governor" in field_names
+        assert "is_gov" in field_names
         assert "is_synthetic" in field_names  # Synthetic marker
 
     def test_schema_has_is_synthetic_marker(self) -> None:

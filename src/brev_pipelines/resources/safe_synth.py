@@ -652,7 +652,7 @@ size {file_size}
     def _synthesize_via_api(
         self,
         data: list[dict[str, Any]],
-        config: SafeSynthConfig | None = None,
+        _config: SafeSynthConfig | None = None,
         run_id: str | None = None,
     ) -> tuple[list[dict[str, Any]], SafeSynthEvaluationResult]:
         """Synthesize data via NeMo SDK with Gitea-compatible NDS upload.
